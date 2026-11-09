@@ -1,0 +1,27 @@
+{
+  "name": "@lalcha/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "tsx src/index.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:setup": "tsx src/setup.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lalcha/domain": "workspace:*",
+    "@hono/node-server": "^1.14.0",
+    "drizzle-orm": "^0.44.0",
+    "hono": "^4.8.0",
+    "postgres": "^3.4.5",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "drizzle-kit": "^0.31.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  },
+  "license": "AGPL-3.0-only"
+}
