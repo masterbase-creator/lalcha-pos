@@ -1,0 +1,18 @@
+{
+  "name": "lalcha-pos",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:setup": "pnpm --filter @lalcha/api db:setup",
+    "test": "pnpm --filter @lalcha/domain test",
+    "typecheck": "pnpm -r typecheck",
+    "start": "pnpm --filter @lalcha/pos build && pnpm --parallel --filter @lalcha/api --filter @lalcha/pos run serve"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "version": "0.1.0",
+  "description": "Open source POS, inventory, purchasing, baki and offline-first retail platform for shops in Bangladesh.",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22"
+  }
+}
