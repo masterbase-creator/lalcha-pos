@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SHOPS as ALL_SHOPS } from "./shops.mjs";
 import { shopIcon } from "./icons.mjs";
+import { shareImageFor } from "./share.mjs";
 
 /** Same order as onboarding in the app; "Any retail shop" always last. */
 const ORDER = ["grocery", "general_store", "pharmacy", "restaurant", "tea_stall", "hardware", "furniture", "electronics", "auto_parts", "fashion", "jewellery", "cosmetics", "optical", "stationery", "bakery", "agro", "wholesale", "general"];
@@ -25,6 +26,7 @@ const DEMO_LABEL = "demo.lalcha.com";
  * Files get their content's fingerprint in the address (style.css?v=…), so a changed stylesheet or
  * logo reaches visitors at once instead of after Cloudflare's and the browser's caches expire.
  */
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 const v = (file) => `/${file}?v=${createHash("sha256").update(readFileSync(join(here, "public", file))).digest("hex").slice(0, 10)}`;
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
@@ -56,6 +58,10 @@ function page({ lang, path, title, description, body, alt = true, schema = [], n
     ? `<link rel="alternate" hreflang="bn" href="${SITE}${path}"><link rel="alternate" hreflang="en" href="${SITE}/en${path}"><link rel="alternate" hreflang="x-default" href="${SITE}${path}">`
     : "";
   const otherHref = alt ? (lang === "bn" ? `/en${path}` : path) : u.other;
+  // The share picture's address changes with its content, so apps that cache previews pick up a new one.
+  const share = shareImageFor(lang, alt ? path : "/");
+  const shareUrl = `${SITE}${v(`og/${share.file}`)}`;
+  const shareTitle = title.replace(/ \| Lalcha POS$/, "");
   const currentIf = (href) => (href === `${u.prefix}${path}` ? ' aria-current="page"' : "");
   const navLinks = [[`${u.prefix}/#live`, u.demo], [`${u.prefix}/for/`, u.shopTypes], [`${u.prefix}/#features`, u.features], [`${u.prefix}/#pricing`, u.pricing], [`${u.prefix}/contact/`, u.contact]]
     .map(([href, label]) => `<a href="${href}"${currentIf(href)}>${label}</a>`)
@@ -71,16 +77,30 @@ ${noindex ? '<meta name="robots" content="noindex">' : ""}
 <link rel="canonical" href="${canonical}">
 ${links}
 <meta name="theme-color" content="#fffdf6">
+<meta name="application-name" content="Lalcha POS">
+<meta name="apple-mobile-web-app-title" content="Lalcha POS">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Lalcha POS">
-<meta property="og:title" content="${title}">
-<meta property="og:description" content="${description}">
+<meta property="og:title" content="${esc(shareTitle)}">
+<meta property="og:description" content="${esc(description)}">
 <meta property="og:url" content="${canonical}">
 <meta property="og:locale" content="${u.locale}">
-<meta property="og:image" content="${SITE}/icon.svg">
-<meta name="apple-mobile-web-app-title" content="Lalcha POS">
-<meta name="twitter:card" content="summary">
+<meta property="og:locale:alternate" content="${lang === "bn" ? "en_US" : "bn_BD"}">
+<meta property="og:image" content="${shareUrl}">
+<meta property="og:image:secure_url" content="${shareUrl}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${esc(share.alt)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${esc(shareTitle)}">
+<meta name="twitter:description" content="${esc(description)}">
+<meta name="twitter:image" content="${shareUrl}">
+<meta name="twitter:image:alt" content="${esc(share.alt)}">
 <link rel="icon" href="${v("icon.svg")}" type="image/svg+xml">
+<link rel="icon" href="${v("icon-192.png")}" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="${v("apple-touch-icon.png")}" sizes="180x180">
+<link rel="manifest" href="${v("site.webmanifest")}">
 <link rel="stylesheet" href="${v("style.css")}">
 ${[ORG, ...schema].map((s) => `<script type="application/ld+json">${JSON.stringify(s)}</script>`).join("\n")}
 </head>

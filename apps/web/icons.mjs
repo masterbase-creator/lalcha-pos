@@ -43,5 +43,8 @@ const ICONS = {
   general: `<path ${lime} d="M17 4h9a2 2 0 0 1 2 2v9L16.5 26.5 5.5 15.5z"/><path ${ink} d="M17 4h9a2 2 0 0 1 2 2v9L16.5 26.5a2.1 2.1 0 0 1-3 0l-8-8a2.1 2.1 0 0 1 0-3z"/><circle cx="22.5" cy="9.5" r="2" fill="currentColor"/>`,
 };
 
+/** The icon's drawing alone, for the share images drawn at build time. */
+export const shopIconInner = (type) => ICONS[type] ?? ICONS.general;
+
 /** The icon for a shop type, sized by CSS. Decorative: the card's heading names the shop. */
 export const shopIcon = (type) => `<svg class="ico" viewBox="0 0 32 32" aria-hidden="true" focusable="false">${ICONS[type] ?? ICONS.general}</svg>`;

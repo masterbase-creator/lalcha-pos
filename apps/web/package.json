@@ -7,5 +7,9 @@
   "scripts": {
     "build": "node build.mjs",
     "serve": "node serve.mjs"
+  },
+  "devDependencies": {
+    "@fontsource/archivo": "5.2.0",
+    "@fontsource/hind-siliguri": "5.2.0"
   }
 }
