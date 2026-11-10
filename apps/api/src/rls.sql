@@ -33,6 +33,8 @@ GRANT SELECT, INSERT, UPDATE ON platform_mail TO lalcha_platform;
 -- Scheduled cleanup: which photos are still used, and removing expired one-time codes.
 GRANT SELECT (image_url) ON products TO lalcha_platform;
 GRANT SELECT, DELETE ON login_codes, signup_codes TO lalcha_platform;
+-- The superadmin "reset owner PIN" button emails the owner a code; it never sets or shows a PIN.
+GRANT INSERT, UPDATE ON login_codes TO lalcha_platform;
 
 GRANT USAGE ON SCHEMA public TO lalcha_app;
 GRANT SELECT, INSERT ON stores TO lalcha_app;

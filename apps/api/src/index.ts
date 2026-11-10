@@ -36,6 +36,7 @@ import { registerReports } from "./reports.ts";
 import { auditLog, branches, coupons, giftCardLedger, giftCards, loyaltyLedger, productPacks, products, restaurantTables, saleLines, sales, stockLedger, stores, users } from "./schema.ts";
 import { ensureBatch, receiveSerials, sellSerials, takeStock } from "./stock.ts";
 import { registerFeatures } from "./features.ts";
+import { registerAccount } from "./account.ts";
 import { registerStorage, saveProductImage, removeProductImage } from "./storage.ts";
 
 function subdomainFrom(host: string | undefined) {
@@ -76,6 +77,7 @@ for (const path of ["/v1/products", "/v1/products/*", "/v1/suppliers", "/v1/supp
   app.use(path, requireActiveSubscription);
 }
 registerAuth(app);
+registerAccount(app);
 registerBilling(app);
 app.use("/v1/catalog", requireDevice);
 app.use("/v1/sync/*", requireDevice);

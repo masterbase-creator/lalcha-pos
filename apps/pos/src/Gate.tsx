@@ -1,3 +1,6 @@
+// Imported, so its address carries a fingerprint and a new logo shows at once.
+import logoUrl from "./logo.svg";
+import { ForgotPin } from "./PinReset";
 import type { Lang, StaffMember } from "@lalcha/domain";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { App } from "./App";
@@ -28,7 +31,7 @@ function Shell({ lang, toggle, children, overlay }: { lang: Lang; toggle: () => 
   return (
     <div className={`no-print flex flex-col bg-bg ${overlay ? "fixed inset-0 z-[60]" : "h-full"}`}>
       <header className="flex items-center justify-between border-b-[3px] border-line bg-panel px-4 py-2.5">
-        <span className="flex items-center gap-2 text-lg font-black"><img src="/icon.svg" alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
+        <span className="flex items-center gap-2 text-lg font-black"><img src={logoUrl} alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
         <button className="min-h-9 border-2 border-line px-3 text-sm font-bold text-text" onClick={toggle}>
           {lang === "bn" ? "EN" : "বাং"}
         </button>
@@ -198,6 +201,7 @@ function PinScreen({ overlay, demo }: { overlay: boolean; demo: DemoInfo | null 
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -220,7 +224,7 @@ function PinScreen({ overlay, demo }: { overlay: boolean; demo: DemoInfo | null 
   }, [selected, pin, busy, t]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || resetting) return;
     const onKey = (e: KeyboardEvent) => {
       if (/^\d$/.test(e.key)) setPin((p) => (p.length < 6 ? p + e.key : p));
       else if (e.key === "Backspace") setPin((p) => p.slice(0, -1));
@@ -229,7 +233,7 @@ function PinScreen({ overlay, demo }: { overlay: boolean; demo: DemoInfo | null 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, submit]);
+  }, [selected, submit, resetting]);
 
   return (
     <Shell lang={lang} toggle={toggle} overlay={overlay}>
@@ -272,6 +276,22 @@ function PinScreen({ overlay, demo }: { overlay: boolean; demo: DemoInfo | null 
             </div>
           )}
         </div>
+      ) : resetting ? (
+        <div className="mx-auto mt-2 max-w-sm">
+          <ForgotPin
+            person={selected}
+            t={t}
+            onCancel={() => setResetting(false)}
+            onDone={(newPin) => {
+              setResetting(false);
+              setBusy(true);
+              void signIn(selected, newPin).then((result) => {
+                setBusy(false);
+                if (result !== "ok") setError(t(errorKey[result]));
+              });
+            }}
+          />
+        </div>
       ) : (
         <div className="mx-auto mt-2 max-w-xs space-y-3">
           <button className="min-h-11 font-bold underline" onClick={() => setSelected(null)}>
@@ -302,6 +322,11 @@ function PinScreen({ overlay, demo }: { overlay: boolean; demo: DemoInfo | null 
               ✓
             </button>
           </div>
+          {!demo?.demo && (
+            <button className="min-h-11 w-full font-bold underline" onClick={() => { setError(""); setResetting(true); }}>
+              {t("forgotPin")}
+            </button>
+          )}
         </div>
       )}
     </Shell>

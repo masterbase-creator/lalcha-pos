@@ -1,8 +1,10 @@
 // Builds the public website as plain HTML, so search engines can read every page and it loads fast on mobile data.
-import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SHOPS as ALL_SHOPS } from "./shops.mjs";
+import { shopIcon } from "./icons.mjs";
 
 /** Same order as onboarding in the app; "Any retail shop" always last. */
 const ORDER = ["grocery", "general_store", "pharmacy", "restaurant", "tea_stall", "hardware", "furniture", "electronics", "auto_parts", "fashion", "jewellery", "cosmetics", "optical", "stationery", "bakery", "agro", "wholesale", "general"];
@@ -19,6 +21,11 @@ const CONTACT = "hello@lalcha.com";
 const DEMO_URL = process.env.DEMO_URL ?? "https://demo.lalcha.com/";
 /** Shown above the demo frame. Always the public address, even in a local preview. */
 const DEMO_LABEL = "demo.lalcha.com";
+/**
+ * Files get their content's fingerprint in the address (style.css?v=…), so a changed stylesheet or
+ * logo reaches visitors at once instead of after Cloudflare's and the browser's caches expire.
+ */
+const v = (file) => `/${file}?v=${createHash("sha256").update(readFileSync(join(here, "public", file))).digest("hex").slice(0, 10)}`;
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 cpSync(join(here, "public"), dist, { recursive: true });
@@ -26,12 +33,12 @@ cpSync(join(here, "public"), dist, { recursive: true });
 const ui = {
   en: {
     prefix: "/en", other: "/", otherLabel: "বাংলা", locale: "en_US",
-    demo: "Demo", shopTypes: "For your shop", contact: "Contact", features: "Features", pricing: "Pricing", openSource: "Open source", signIn: "Sign in", start: "Start free", privacy: "Privacy", terms: "Terms",
+    demo: "Demo", menu: "Menu", shopTypes: "For your shop", contact: "Contact", features: "Features", pricing: "Pricing", openSource: "Open source", signIn: "Sign in", start: "Start free", privacy: "Privacy", terms: "Terms",
     rights: "Lalcha POS. Open source software for shops in Bangladesh.",
   },
   bn: {
     prefix: "", other: "/en/", otherLabel: "English", locale: "bn_BD",
-    demo: "ডেমো", shopTypes: "দোকান অনুযায়ী", contact: "যোগাযোগ", features: "সুবিধা", pricing: "মূল্য", openSource: "ওপেন সোর্স", signIn: "সাইন ইন", start: "ফ্রি শুরু করুন", privacy: "প্রাইভেসি", terms: "শর্তাবলি",
+    demo: "ডেমো", menu: "মেনু", shopTypes: "দোকান অনুযায়ী", contact: "যোগাযোগ", features: "সুবিধা", pricing: "মূল্য", openSource: "ওপেন সোর্স", signIn: "সাইন ইন", start: "ফ্রি শুরু করুন", privacy: "প্রাইভেসি", terms: "শর্তাবলি",
     rights: "Lalcha POS। বাংলাদেশের দোকানের জন্য ওপেন সোর্স সফটওয়্যার।",
   },
 };
@@ -49,6 +56,10 @@ function page({ lang, path, title, description, body, alt = true, schema = [], n
     ? `<link rel="alternate" hreflang="bn" href="${SITE}${path}"><link rel="alternate" hreflang="en" href="${SITE}/en${path}"><link rel="alternate" hreflang="x-default" href="${SITE}${path}">`
     : "";
   const otherHref = alt ? (lang === "bn" ? `/en${path}` : path) : u.other;
+  const currentIf = (href) => (href === `${u.prefix}${path}` ? ' aria-current="page"' : "");
+  const navLinks = [[`${u.prefix}/#live`, u.demo], [`${u.prefix}/for/`, u.shopTypes], [`${u.prefix}/#features`, u.features], [`${u.prefix}/#pricing`, u.pricing], [`${u.prefix}/contact/`, u.contact]]
+    .map(([href, label]) => `<a href="${href}"${currentIf(href)}>${label}</a>`)
+    .join("");
   return `<!doctype html>
 <html lang="${lang}">
 <head>
@@ -67,17 +78,18 @@ ${links}
 <meta property="og:url" content="${canonical}">
 <meta property="og:locale" content="${u.locale}">
 <meta property="og:image" content="${SITE}/icon.svg">
+<meta name="apple-mobile-web-app-title" content="Lalcha POS">
 <meta name="twitter:card" content="summary">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="${v("icon.svg")}" type="image/svg+xml">
+<link rel="stylesheet" href="${v("style.css")}">
 ${[ORG, ...schema].map((s) => `<script type="application/ld+json">${JSON.stringify(s)}</script>`).join("\n")}
 </head>
 <body>
-<header class="site"><div class="wrap">
-<a class="logo" href="${u.prefix}/"><img src="/icon.svg" alt="" width="38" height="38">Lalcha POS</a>
-<nav class="top" aria-label="Main">
-<a href="${u.prefix}/#live">${u.demo}</a><a href="${u.prefix}/for/">${u.shopTypes}</a><a href="${u.prefix}/#features">${u.features}</a><a href="${u.prefix}/#pricing">${u.pricing}</a><a href="/open-source/">${u.openSource}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${otherHref}">${u.otherLabel}</a><a href="${u.prefix}/login/">${u.signIn}</a><a class="btn small" href="${u.prefix}/signup/">${u.start}</a>
-</nav>
+<header class="site"><div class="wrap bar">
+<a class="logo" href="${u.prefix}/" aria-label="Lalcha POS"><img src="${v("icon.svg")}" alt="" width="40" height="40"><span class="logo-word">Lalcha<span class="logo-pos">POS</span></span></a>
+<nav class="top" aria-label="Main">${navLinks}</nav>
+<div class="actions"><a class="lang" href="${otherHref}" hreflang="${lang === "bn" ? "en" : "bn"}" lang="${lang === "bn" ? "en" : "bn"}">${lang === "bn" ? "EN" : "বাং"}</a><a class="signin" href="${u.prefix}/login/">${u.signIn}</a><a class="btn small" href="${u.prefix}/signup/">${u.start}</a></div>
+<details class="menu"><summary aria-label="${u.menu}"><span aria-hidden="true"></span></summary><nav aria-label="${u.menu}">${navLinks}<a href="${u.prefix}/login/">${u.signIn}</a><a href="${otherHref}">${u.otherLabel}</a><a class="menu-cta" href="${u.prefix}/signup/">${u.start}</a></nav></details>
 </div></header>
 ${body}
 <footer><div class="wrap"><span>© ${new Date().getFullYear()} ${u.rights}</span>
@@ -191,7 +203,7 @@ for (const lang of ["bn", "en"]) {
 </div>
 </div></section>
 <section class="band alt" id="features"><div class="wrap"><h2>${c.featuresTitle}</h2><div class="grid">${c.list.map(([h, p]) => `<article class="card"><h3>${h}</h3><p>${p}</p></article>`).join("")}</div></div></section>
-<section class="band" id="shops"><div class="wrap"><h2>${c.shopsTitle}</h2><p class="lead">${c.shopsLead}</p><div class="grid shops">${SHOPS.map((x) => `<a class="card shop" href="${u.prefix}/for/${x.slug}/"><span class="shop-icon" aria-hidden="true">${x.icon}</span><h3>${x[lang].name}</h3><p>${teaser(x, lang)}</p></a>`).join("")}</div></div></section>
+<section class="band" id="shops"><div class="wrap"><h2>${c.shopsTitle}</h2><p class="lead">${c.shopsLead}</p><div class="grid shops">${SHOPS.map((x) => `<a class="card shop" href="${u.prefix}/for/${x.slug}/"><span class="shop-icon">${shopIcon(x.type)}</span><h3>${x[lang].name}</h3><p>${teaser(x, lang)}</p></a>`).join("")}</div></div></section>
 <section class="band" id="pricing"><div class="wrap"><h2>${c.pricingTitle}</h2><div class="grid">${plans.map(([n, p, d, b]) => `<article class="card"><h3>${n}</h3><div class="price">${p}</div><p>${c.month} · ${d} ${c.devices} · ${b} ${c.branches}</p><p style="margin-top:14px"><a class="btn small" href="${u.prefix}/signup/">${c.choose}</a></p></article>`).join("")}<article class="card"><h3>${c.enterprise}</h3><div class="price">${c.custom}</div><p>${c.enterpriseText}</p><p style="margin-top:14px"><a class="btn small alt" href="${u.prefix}/contact/?topic=enterprise">${c.talk}</a></p></article></div></div></section>
 <section class="band alt"><div class="wrap"><h2>${c.faqTitle}</h2>${c.faq.map(([q, a]) => `<details><summary>${q}</summary><p>${a}</p></details>`).join("")}</div></section>
 </main>`;
@@ -218,7 +230,7 @@ for (const lang of ["bn", "en"]) {
 <p class="error" id="error" role="alert"></p>
 <button class="btn" type="submit">${s.send}</button>
 <p class="note">${s.agree}</p><p class="note"><a href="${u.prefix}/login/">${s.have}</a></p>
-</form></main><script src="/signup.js" defer></script>`,
+</form></main><script src="${v("signup.js")}" defer></script>`,
   }));
 
   const l = lang === "bn"
@@ -226,7 +238,7 @@ for (const lang of ["bn", "en"]) {
     : { title: "Sign in", intro: "Enter your store's address.", label: "Store address", go: "Go to my store", invalid: "Enter a valid store address.", none: "New here? Start free" };
   write(`${lang === "en" ? "en/" : ""}login`, page({
     lang, path: "/login/", title: `${l.title} | Lalcha POS`, description: l.intro,
-    body: `<main><form class="form" id="login" data-invalid="${l.invalid}"><h1>${l.title}</h1><p class="note">${l.intro}</p><label>${l.label}<input name="subdomain" required placeholder="mystore" autocapitalize="none"><span class="hint">mystore.lalcha.com</span></label><p class="error" id="error" role="alert"></p><button class="btn" type="submit">${l.go}</button><p class="note"><a href="${u.prefix}/signup/">${l.none}</a></p></form></main><script src="/login.js" defer></script>`,
+    body: `<main><form class="form" id="login" data-invalid="${l.invalid}"><h1>${l.title}</h1><p class="note">${l.intro}</p><label>${l.label}<input name="subdomain" required placeholder="mystore" autocapitalize="none"><span class="hint">mystore.lalcha.com</span></label><p class="error" id="error" role="alert"></p><button class="btn" type="submit">${l.go}</button><p class="note"><a href="${u.prefix}/signup/">${l.none}</a></p></form></main><script src="${v("login.js")}" defer></script>`,
   }));
 
   const k = lang === "bn"
@@ -244,7 +256,7 @@ for (const lang of ["bn", "en"]) {
 <label>${k.message}<textarea name="message" required maxlength="2000" rows="5"></textarea></label>
 <p class="error" id="error" role="alert"></p>
 <button class="btn" type="submit">${k.send}</button><p class="note">${k.sendNote}</p>
-</form></main><script src="/contact.js" defer></script>`,
+</form></main><script src="${v("contact.js")}" defer></script>`,
   }));
 }
 
@@ -300,7 +312,7 @@ for (const lang of ["bn", "en"]) {
     lang, path: "/for/", title: `${s.all} | Lalcha POS`, description: s.allLead,
     schema: [crumbs([[s.home, `${u.prefix}/`], [u.shopTypes, `${u.prefix}/for/`]]), { "@context": "https://schema.org", "@type": "ItemList", itemListElement: SHOPS.map((x, i) => ({ "@type": "ListItem", position: i + 1, url: `${SITE}${u.prefix}/for/${x.slug}/`, name: x[lang].h1 })) }],
     body: `<main><section class="hero"><div class="wrap"><h1>${s.all}</h1><p class="lead">${s.allLead}</p></div></section>
-<section class="band"><div class="wrap"><div class="grid shops">${SHOPS.map((x) => `<a class="card shop" href="${u.prefix}/for/${x.slug}/"><span class="shop-icon" aria-hidden="true">${x.icon}</span><h2>${x[lang].name}</h2><p>${x[lang].description}</p></a>`).join("")}</div></div></section></main>`,
+<section class="band"><div class="wrap"><div class="grid shops">${SHOPS.map((x) => `<a class="card shop" href="${u.prefix}/for/${x.slug}/"><span class="shop-icon">${shopIcon(x.type)}</span><h2>${x[lang].name}</h2><p>${x[lang].description}</p></a>`).join("")}</div></div></section></main>`,
   }));
 
   for (const shop of SHOPS) {
@@ -323,12 +335,12 @@ for (const lang of ["bn", "en"]) {
       ],
       body: `<main>
 <nav class="crumbs wrap" aria-label="Breadcrumb"><a href="${u.prefix}/">${s.home}</a> › <a href="${u.prefix}/for/">${u.shopTypes}</a> › <span>${c.name}</span></nav>
-<section class="hero"><div class="wrap"><p class="shop-icon big" aria-hidden="true">${shop.icon}</p><h1>${c.h1}</h1><p class="lead answer">${c.lead}</p>
+<section class="hero"><div class="wrap"><p class="shop-icon big">${shopIcon(shop.type)}</p><h1>${c.h1}</h1><p class="lead answer">${c.lead}</p>
 <div class="cta"><a class="btn" href="${signup}">${s.start}</a><a class="btn alt" href="${DEMO_URL}" target="_blank" rel="noopener">${s.demo}</a></div><p class="note">${s.trial}</p></div></section>
 <section class="band alt"><div class="wrap"><h2>${s.features}</h2><div class="grid">${c.features.map(([h, p]) => `<article class="card"><h3>${h}</h3><p>${p}</p></article>`).join("")}</div></div></section>
 <section class="band"><div class="wrap"><h2>${s.how}</h2><ol class="steps">${c.steps.map((x) => `<li>${x}</li>`).join("")}</ol><p><a class="btn" href="${signup}">${s.start}</a></p></div></section>
 <section class="band alt"><div class="wrap"><h2>${s.faq}</h2>${c.faq.map(([q, a]) => `<details open><summary>${q}</summary><p>${a}</p></details>`).join("")}</div></section>
-<section class="band"><div class="wrap"><h2>${s.others}</h2><p class="chips">${SHOPS.filter((x) => x !== shop).map((x) => `<a href="${u.prefix}/for/${x.slug}/">${x.icon} ${x[lang].name}</a>`).join("")}</p></div></section>
+<section class="band"><div class="wrap"><h2>${s.others}</h2><p class="chips">${SHOPS.filter((x) => x !== shop).map((x) => `<a href="${u.prefix}/for/${x.slug}/">${shopIcon(x.type)}${x[lang].name}</a>`).join("")}</p></div></section>
 </main>`,
     }));
   }

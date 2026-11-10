@@ -87,13 +87,26 @@ export async function deleteMeta(k: string) {
   await run([{ sql: "DELETE FROM meta WHERE k = ?", bind: [k] }]);
 }
 
+/**
+ * Also forgets the offline PIN of anyone removed from the store, and of anyone whose PIN changed
+ * elsewhere (reset by email, or changed on another till), so an old PIN stops working here too.
+ */
 export async function saveStaff(staff: StaffMember[]) {
   const ids = staff.map((s) => s.id);
+  const [before] = await run([{ sql: "SELECT id, pin_version FROM staff" }]);
+  const known = new Map(before.map((r) => [r.id as string, r.pin_version as string | null]));
+  const changed = staff.filter((s) => s.pinVersion && known.get(s.id) && known.get(s.id) !== s.pinVersion).map((s) => s.id);
   await run([
     { sql: "DELETE FROM staff" },
-    ...staff.map((s) => ({ sql: "INSERT INTO staff (id, name, role) VALUES (?,?,?)", bind: [s.id, s.name, s.role] })),
+    ...staff.map((s) => ({ sql: "INSERT INTO staff (id, name, role, pin_version) VALUES (?,?,?,?)", bind: [s.id, s.name, s.role, s.pinVersion ?? null] })),
     { sql: `DELETE FROM staff_pins WHERE user_id NOT IN (${ids.map(() => "?").join(",")})`, bind: ids },
+    ...changed.map((id) => ({ sql: "DELETE FROM staff_pins WHERE user_id = ?", bind: [id] })),
   ]);
+}
+
+/** After this device itself changes someone's PIN: drop the old offline copy right away. */
+export async function forgetPin(userId: string) {
+  await run([{ sql: "DELETE FROM staff_pins WHERE user_id = ?", bind: [userId] }]);
 }
 
 export async function loadStaff(): Promise<StaffMember[]> {

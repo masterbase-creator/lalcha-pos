@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { requireDevice, requireRole, requireSession } from "./auth.ts";
 import { sendCode } from "./mail.ts";
+import { issueCode, pinResetKey } from "./account.ts";
 import { config } from "./config.ts";
 import { audit, db, pgCode, platformDb, withStore, type Env, type Tx } from "./db.ts";
 import { ApiError, guarded, PAGE_SIZE, pageOf, parse } from "./http.ts";
@@ -438,17 +439,22 @@ export function registerPlatform(app: Hono<Env>) {
   app.post(
     "/v1/platform/stores/:id/reset-owner-pin",
     guarded(async (c) => {
+      // You never see or read out an owner's PIN: the owner gets a code by email and sets a new PIN themselves.
       const id = storeParam(c);
-      let pin = newCode();
-      while (!pinSchema.safeParse(pin).success) pin = newCode();
-      const pinHash = await hashPin(pin);
-      await platformDb.transaction(async (tx) => {
-        const rows = await tx.update(users).set({ pinHash, pinFailed: 0, pinLockedUntil: null }).where(and(eq(users.storeId, id), eq(users.role, "owner"))).returning({ id: users.id });
-        if (!rows.length) throw new ApiError("not_found", 404);
-        await tx.update(sessions).set({ revokedAt: new Date() }).where(and(eq(sessions.storeId, id), eq(sessions.userId, rows[0].id)));
-        await log(c, tx, id, "reset_owner_pin");
+      const sent = await platformDb.transaction(async (tx) => {
+        const [owner] = await tx
+          .select({ email: users.email, store: stores.name })
+          .from(users)
+          .innerJoin(stores, eq(stores.id, users.storeId))
+          .where(and(eq(users.storeId, id), eq(users.role, "owner")));
+        if (!owner) throw new ApiError("not_found", 404);
+        if (!owner.email) throw new ApiError("owner_has_no_email", 409);
+        const code = await issueCode(tx, id, pinResetKey(owner.email), 30 * 60_000);
+        await log(c, tx, id, "reset_owner_pin_email");
+        return { ...owner, code };
       });
-      return c.json({ pin });
+      if (sent.code) await sendCode(sent.email!, sent.code, `${sent.store}: পিন বদলানোর কোড (৩০ মিনিট)`);
+      return c.json({ sentTo: sent.email!.replace(/^(.{2}).*(@.*)$/, "$1•••$2"), resent: Boolean(sent.code) });
     }),
   );
 

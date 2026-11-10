@@ -183,7 +183,7 @@ export const staffUpdateSchema = z.object({
   disabled: z.boolean(),
 });
 
-export type StaffMember = { id: string; name: string; role: Role };
+export type StaffMember = { id: string; name: string; role: Role; pinVersion?: string };
 export type StaffRecord = StaffMember & { email: string | null; phone: string | null; disabled: boolean };
 export type DeviceRecord = { id: string; name: string; lastSeenAt: string; branchId: string };
 export type SignInResponse = { token: string; expiresAt: string; user: StaffMember };

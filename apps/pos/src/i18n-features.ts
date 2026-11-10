@@ -1,6 +1,13 @@
 /** Wording for onboarding, batches, serials, restaurant, loyalty, accounts and printing. */
 export const featureStrings = {
   en: {
+    // PIN reset and account
+    forgotPin: "Forgot PIN?", resetTitle: "Set a new PIN", resetHelp: "Enter your email. We'll send a 6-digit code so you can set a new PIN.",
+    resetCashierHelp: "Cashier? Ask the owner or a manager to set a new PIN for you in Staff.", codeSentEmail: "If this email belongs to an owner or manager here, a code is on its way. Check spam too.",
+    newPinLabel: "New PIN (4–6 digits)", confirmPin: "New PIN again", pinMismatch: "The two PINs don't match.", setNewPin: "Save new PIN",
+    pinChanged: "PIN changed. Other devices will ask for the new PIN.", resetNeedsOnline: "Changing a PIN needs internet.", backToPin: "Back to PIN",
+    account: "My account", changePin: "Change PIN", currentPin: "Current PIN", changeEmail: "Change email", currentEmail: "Current email", newEmail: "New email",
+    sendCodeToNew: "Send code to new email", emailChanged: "Email changed. Codes now go to the new address.", noEmailYet: "No email yet", accountHelp: "Your sign-in details. Codes to connect devices and reset your PIN go to this email.",
     // Onboarding
     onbTitle: "Welcome! Let's set up your shop", onbStep1: "What kind of shop is it?", onbStep2: "Pick what you need",
     onbStep2Help: "We've ticked what your kind of shop usually needs. You can change this any time in Settings.", onbStep3: "Receipts and cash drawer",
@@ -56,6 +63,12 @@ export const featureStrings = {
     invalid_range: "Choose a valid date range (up to a year).",
   },
   bn: {
+    forgotPin: "পিন ভুলে গেছেন?", resetTitle: "নতুন পিন দিন", resetHelp: "আপনার ইমেইল দিন। নতুন পিন দেওয়ার জন্য ৬ সংখ্যার একটা কোড পাঠাব।",
+    resetCashierHelp: "ক্যাশিয়ার হলে মালিক বা ম্যানেজারকে বলুন, কর্মী পাতা থেকে নতুন পিন দিয়ে দেবেন।", codeSentEmail: "এই ইমেইল এই দোকানের মালিক বা ম্যানেজারের হলে কোড চলে গেছে। স্প্যাম ফোল্ডারও দেখে নিন।",
+    newPinLabel: "নতুন পিন (৪–৬ সংখ্যা)", confirmPin: "নতুন পিন আবার দিন", pinMismatch: "দুটো পিন মেলেনি।", setNewPin: "নতুন পিন সেভ করুন",
+    pinChanged: "পিন বদলানো হয়েছে। অন্য ডিভাইসেও এখন নতুন পিন লাগবে।", resetNeedsOnline: "পিন বদলাতে ইন্টারনেট লাগবে।", backToPin: "পিনে ফিরে যান",
+    account: "আমার অ্যাকাউন্ট", changePin: "পিন বদলান", currentPin: "এখনকার পিন", changeEmail: "ইমেইল বদলান", currentEmail: "এখনকার ইমেইল", newEmail: "নতুন ইমেইল",
+    sendCodeToNew: "নতুন ইমেইলে কোড পাঠান", emailChanged: "ইমেইল বদলানো হয়েছে। এখন থেকে কোড নতুন ঠিকানায় যাবে।", noEmailYet: "এখনো ইমেইল দেওয়া হয়নি", accountHelp: "আপনার সাইন-ইনের তথ্য। ডিভাইস যুক্ত করা আর পিন বদলানোর কোড এই ইমেইলে আসবে।",
     onbTitle: "স্বাগতম! চলুন দোকানটা সাজিয়ে নিই", onbStep1: "আপনার দোকান কী ধরনের?", onbStep2: "যা যা লাগবে বেছে নিন",
     onbStep2Help: "আপনার মতো দোকানে সাধারণত যা লাগে, তা আগেই টিক দেওয়া আছে। পরে সেটিংস থেকে যখন খুশি বদলাতে পারবেন।", onbStep3: "রসিদ আর ক্যাশ ড্রয়ার",
     onbStepOf: "ধাপ", back: "পেছনে", next: "পরের ধাপ", startSelling: "বিক্রি শুরু করুন", alwaysIncluded: "সবসময় থাকছে: বিক্রি, স্টক, বাকির খাতা, সরবরাহকারী, ফেরত, রিপোর্ট, কর্মী ও শাখা।",

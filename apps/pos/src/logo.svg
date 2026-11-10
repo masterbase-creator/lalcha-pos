@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Lalcha POS">
+  <title>Lalcha POS</title>
+  <!-- Lal cha, red tea with no milk, in the ribbed glass every tea stall in Bangladesh uses. -->
+  <defs><clipPath id="lalcha-glass"><path d="M22 14h56l-6.6 72.5a6 6 0 0 1-6 5.5H34.6a6 6 0 0 1-6-5.5z"/></clipPath></defs>
+  <g clip-path="url(#lalcha-glass)">
+    <rect x="10" y="14" width="80" height="80" fill="#FFFDF6"/>
+    <rect x="10" y="30" width="80" height="64" fill="#B3261E"/>
+    <path d="M10 30h80" stroke="#7A140D" stroke-width="3"/>
+    <path d="M38 33l2.4 56M50 33v56M62 33l-2.4 56" stroke="#FFFDF6" stroke-opacity=".25" stroke-width="3.5"/>
+  </g>
+  <path d="M22 14h56l-6.6 72.5a6 6 0 0 1-6 5.5H34.6a6 6 0 0 1-6-5.5z" fill="none" stroke="#12130F" stroke-width="6" stroke-linejoin="round"/>
+</svg>

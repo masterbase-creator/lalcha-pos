@@ -1,3 +1,5 @@
+// Imported, so its address carries a fingerprint and a new logo shows at once.
+import logoUrl from "./logo.svg";
 import {
   computeBill,
   computeTotals,
@@ -33,6 +35,7 @@ import { AccountsScreen } from "./AccountsScreen";
 import { ExpiryScreen } from "./ExpiryScreen";
 import { LoyaltyScreen } from "./LoyaltyScreen";
 import { Onboarding } from "./Onboarding";
+import { AccountScreen } from "./PinReset";
 import { WarrantyScreen } from "./WarrantyScreen";
 import { openDrawer, printDirect, type Line as PrintLine } from "./escpos";
 import { apiFetch } from "./session";
@@ -64,14 +67,14 @@ import { groupTiles, isPack, toSellables, type Sellable } from "./sellables";
 type CartLine = { key: string; product: Sellable; qty: number; note: string | null; extraPoisha: number; serials: string[] };
 const unitPrice = (l: CartLine) => l.product.pricePoisha + l.extraPoisha;
 
-type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "expiry" | "warranty" | "loyalty" | "accounts" | "branches" | "audit" | "staff" | "billing" | "settings";
+type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "expiry" | "warranty" | "loyalty" | "accounts" | "branches" | "audit" | "staff" | "billing" | "settings" | "account";
 /** The menu follows what the store switched on: a grocery never sees Warranty, a pharmacy sees Expiry. */
 function viewsFor(role: string, s: StoreSettings): View[] {
   const optional: [View, boolean][] = [["expiry", hasFeature(s, "batches")], ["warranty", hasFeature(s, "serials")], ["loyalty", hasFeature(s, "loyalty")], ["accounts", hasFeature(s, "accounting")]];
   const extra = optional.filter(([, on]) => on).map(([v]) => v);
-  if (role === "cashier") return ["sell", "baki", ...(hasFeature(s, "serials") ? (["warranty"] as View[]) : [])];
+  if (role === "cashier") return ["sell", "baki", ...(hasFeature(s, "serials") ? (["warranty"] as View[]) : []), "account"];
   const manager: View[] = ["sell", "products", "purchase", "baki", "returns", "reports", ...extra, "branches", "audit", "staff"];
-  return role === "owner" ? [...manager, "billing", "settings"] : manager;
+  return role === "owner" ? [...manager, "billing", "settings", "account"] : [...manager, "account"];
 }
 /** Shown inside another page, such as the demo on the website: grabbing focus there would scroll that page. */
 const EMBEDDED = window.self !== window.top;
@@ -433,7 +436,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   return (
     <div className="flex h-full flex-col">
       <header className="no-print flex items-center gap-3 border-b-[3px] border-line bg-panel px-4 py-2.5 text-text">
-        <span className="flex items-center gap-2 text-lg font-black"><img src="/icon.svg" alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
+        <span className="flex items-center gap-2 text-lg font-black"><img src={logoUrl} alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
         <span className="truncate font-bold">{storeName}{branchName ? ` · ${branchName}` : ""}</span>
         <div className="ml-auto flex items-center gap-2 text-sm font-bold">
           <span className="flex items-center gap-1.5" role="status" data-testid="sync-status">
@@ -500,6 +503,8 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
         <WarrantyScreen lang={lang} t={t} online={sync.online} />
       ) : view === "loyalty" ? (
         <LoyaltyScreen lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
+      ) : view === "account" ? (
+        <AccountScreen userId={user.id} role={user.role} t={t} online={sync.online} />
       ) : view === "accounts" ? (
         <AccountsScreen lang={lang} t={t} online={sync.online} />
       ) : view === "branches" ? (

@@ -35,7 +35,7 @@ const ready = (async () => {
     ? new sqlite3.oo1.DB(":memory:")
     : new (await sqlite3.installOpfsSAHPoolVfs({ name: "lalcha-pos" })).OpfsSAHPoolDb("/pos.sqlite3");
   db.exec(SCHEMA);
-  for (const change of ["ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'pc'", "ALTER TABLE customers ADD COLUMN credit_limit_poisha INTEGER", "ALTER TABLE products ADD COLUMN vat_rate_bp INTEGER", "ALTER TABLE products ADD COLUMN variant_of TEXT", "ALTER TABLE products ADD COLUMN variant_name TEXT", "ALTER TABLE products ADD COLUMN packs TEXT NOT NULL DEFAULT '[]'", "ALTER TABLE products ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'", "ALTER TABLE customers ADD COLUMN points INTEGER NOT NULL DEFAULT 0"]) {
+  for (const change of ["ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'pc'", "ALTER TABLE customers ADD COLUMN credit_limit_poisha INTEGER", "ALTER TABLE products ADD COLUMN vat_rate_bp INTEGER", "ALTER TABLE products ADD COLUMN variant_of TEXT", "ALTER TABLE products ADD COLUMN variant_name TEXT", "ALTER TABLE products ADD COLUMN packs TEXT NOT NULL DEFAULT '[]'", "ALTER TABLE products ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'", "ALTER TABLE customers ADD COLUMN points INTEGER NOT NULL DEFAULT 0", "ALTER TABLE staff ADD COLUMN pin_version TEXT"]) {
     try {
       db.exec(change);
     } catch {

@@ -120,8 +120,8 @@ export function Admin() {
 
   async function storeAction(path: string, body?: unknown) {
     if (!open) return;
-    const result = (await post(`/v1/platform/stores/${open.id}/${path}`, body)) as { pin?: string } | null;
-    if (result?.pin) setShownPin(result.pin);
+    const result = (await post(`/v1/platform/stores/${open.id}/${path}`, body)) as { sentTo?: string; resent?: boolean } | null;
+    if (result?.sentTo) setShownPin(result.resent ? `PIN reset code emailed to ${result.sentTo}. It works for 30 minutes: the owner taps “Forgot PIN?” on their till.` : `A code was already sent to ${result.sentTo} in the last minute. Ask the owner to check their inbox and spam.`);
     await load();
   }
 
@@ -235,9 +235,9 @@ export function Admin() {
             </label>
             <div className="flex flex-wrap gap-2">
               <button className={small} onClick={() => void storeAction("suspend", { suspended: !open.suspended })}>{open.suspended ? "Restore store" : "Suspend store"}</button>
-              <button className={small} onClick={() => void storeAction("reset-owner-pin")}>Reset owner PIN</button>
+              <button className={small} onClick={() => void storeAction("reset-owner-pin")}>Email owner a PIN reset code</button>
             </div>
-            {shownPin && <p data-testid="new-pin" className="bg-accent p-3 text-xl font-black text-on-accent">New owner PIN: {shownPin}. Give it to the verified owner; it won't be shown again.</p>}
+            {shownPin && <p data-testid="new-pin" role="status" className="bg-accent p-3 text-lg font-black text-on-accent">{shownPin}</p>}
             <button className={`${small} w-full`} onClick={() => setOpen(null)}>Close</button>
           </div>
         </div>

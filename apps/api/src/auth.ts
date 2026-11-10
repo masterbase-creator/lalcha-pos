@@ -191,7 +191,8 @@ export function registerAuth(app: Hono<Env>) {
     const store = c.get("store");
     const rows = await withStore(store.id, (tx) =>
       tx
-        .select({ id: users.id, name: users.name, role: users.role })
+        // pinVersion changes whenever the PIN does, so tills drop the old PIN they keep for offline sign-in.
+        .select({ id: users.id, name: users.name, role: users.role, pinVersion: sql<string>`substr(md5(${users.pinHash}), 1, 12)` })
         .from(users)
         .where(and(eq(users.storeId, store.id), isNull(users.disabledAt)))
         .orderBy(users.name),
