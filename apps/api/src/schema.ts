@@ -1,6 +1,7 @@
 import { UNITS } from "@lalcha/domain";
 import { sql } from "drizzle-orm";
 import {
+  date,
   jsonb,
   bigint,
   boolean,
@@ -131,6 +132,12 @@ export const products = pgTable(
     /** Set on a variant: the main product it is listed under. Each variant keeps its own stock. */
     variantOf: uuid("variant_of"),
     variantName: text("variant_name"),
+    /** "batch" follows batch numbers and expiry dates; "serial" follows one IMEI or serial per piece. */
+    tracking: text("tracking", { enum: ["none", "batch", "serial"] }).notNull().default("none"),
+    warrantyMonths: integer("warranty_months"),
+    genericName: text("generic_name"),
+    /** Extras offered at the till: [{ id, name, pricePoisha }]. */
+    modifiers: jsonb("modifiers").$type<{ id: string; name: string; pricePoisha: number }[]>().notNull().default([]),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
   },
   (t) => [
@@ -168,8 +175,10 @@ export const stockLedger = pgTable(
     productId: uuid("product_id").notNull(),
     branchId: uuid("branch_id").notNull(),
     qtyDelta: integer("qty_delta").notNull(),
-    reason: text("reason", { enum: ["opening", "sale", "purchase", "return", "adjustment", "purchase_return", "purchase_void", "transfer_out", "transfer_in", "transfer_cancel"] }).notNull(),
+    reason: text("reason", { enum: ["opening", "sale", "purchase", "return", "adjustment", "purchase_return", "purchase_void", "transfer_out", "transfer_in", "transfer_cancel", "write_off"] }).notNull(),
     refId: uuid("ref_id"),
+    /** Which batch the stock came from or went into, for batch-tracked products. */
+    batchId: uuid("batch_id"),
     actorId: uuid("actor_id"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().default(sql`now()`),
   },
@@ -223,6 +232,14 @@ export const sales = pgTable(
     vatRateBp: integer("vat_rate_bp").notNull().default(0),
     vatInclusive: boolean("vat_inclusive").notNull().default(true),
     vatPoisha: bigint("vat_poisha", { mode: "number" }).notNull().default(0),
+    /** Settled with loyalty points and gift cards. The payment method covers the rest. */
+    pointsRedeemed: integer("points_redeemed").notNull().default(0),
+    pointsPoisha: bigint("points_poisha", { mode: "number" }).notNull().default(0),
+    giftCardCode: text("gift_card_code"),
+    giftCardPoisha: bigint("gift_card_poisha", { mode: "number" }).notNull().default(0),
+    couponCode: text("coupon_code"),
+    tableName: text("table_name"),
+    orderType: text("order_type"),
   },
   (t) => [
     primaryKey({ columns: [t.storeId, t.id] }),
@@ -252,6 +269,8 @@ export const saleLines = pgTable(
     /** How much of the product's own unit one sold item used: 12000 for a dozen eggs. 1000 when sold by its own unit. */
     packQty: integer("pack_qty").notNull().default(1000),
     packName: text("pack_name"),
+    /** Extras and kitchen notes chosen at the till. */
+    note: text("note"),
   },
   (t) => [
     primaryKey({ columns: [t.storeId, t.saleId, t.lineNo] }),
@@ -457,6 +476,17 @@ export const storeSettings = pgTable("store_settings", {
   bin: text("bin"),
   address: text("address"),
   phone: text("phone"),
+  businessType: text("business_type", { enum: ["grocery", "general_store", "pharmacy", "restaurant", "tea_stall", "hardware", "furniture", "electronics", "auto_parts", "fashion", "jewellery", "cosmetics", "optical", "stationery", "bakery", "agro", "wholesale", "general"] }),
+  features: jsonb("features").$type<("batches" | "serials" | "restaurant" | "loyalty" | "accounting")[]>().notNull().default([]),
+  loyaltyEarnPoisha: integer("loyalty_earn_poisha").notNull().default(10000),
+  loyaltyPointPoisha: integer("loyalty_point_poisha").notNull().default(100),
+  receiptPrinter: text("receipt_printer", { enum: ["browser", "direct"] }).notNull().default("browser"),
+  paperWidth: integer("paper_width").$type<58 | 80>().notNull().default(80),
+  cashDrawer: boolean("cash_drawer").notNull().default(false),
+  kitchenTickets: boolean("kitchen_tickets").notNull().default(false),
+  expiryAlertDays: integer("expiry_alert_days").notNull().default(60),
+  /** False until the owner has picked the shop type and features once. */
+  onboarded: boolean("onboarded").notNull().default(false),
 });
 
 export const purchaseReturns = pgTable(
@@ -630,4 +660,151 @@ export const platformMail = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("platform_mail_postal_id").on(t.postalId), index("platform_mail_created").on(t.createdAt)],
+);
+
+/** A batch of a product at one branch: its number and expiry date. Its stock is the ledger entries that name it. */
+export const stockBatches = pgTable(
+  "stock_batches",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull().defaultRandom(),
+    productId: uuid("product_id").notNull(),
+    branchId: uuid("branch_id").notNull(),
+    batchNo: text("batch_no").notNull(),
+    expiresOn: date("expires_on", { mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.storeId, t.id] }),
+    foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [products.storeId, products.id] }),
+    uniqueIndex("stock_batches_unique").on(t.storeId, t.productId, t.branchId, t.batchNo, sql`coalesce(${t.expiresOn}, '9999-12-31')`),
+    index("stock_batches_expiry").on(t.storeId, t.expiresOn),
+  ],
+);
+
+/** One row per serial-tracked piece (a phone's IMEI): where it is and who bought it. */
+export const productSerials = pgTable(
+  "product_serials",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull().defaultRandom(),
+    productId: uuid("product_id").notNull(),
+    serial: text("serial").notNull(),
+    branchId: uuid("branch_id").notNull(),
+    status: text("status", { enum: ["in_stock", "sold", "returned"] }).notNull(),
+    purchaseId: uuid("purchase_id"),
+    saleId: uuid("sale_id"),
+    soldAt: timestamp("sold_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.storeId, t.id] }),
+    foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [products.storeId, products.id] }),
+    uniqueIndex("product_serials_unique").on(t.storeId, t.productId, t.serial),
+    index("product_serials_serial").on(t.storeId, t.serial),
+  ],
+);
+
+export const restaurantTables = pgTable(
+  "restaurant_tables",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    name: text("name").notNull(),
+    area: text("area"),
+    seats: integer("seats"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] })],
+);
+
+/** Append-only: a customer's points are the sum of their entries. */
+export const loyaltyLedger = pgTable(
+  "loyalty_ledger",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull().defaultRandom(),
+    customerId: uuid("customer_id").notNull(),
+    points: integer("points").notNull(),
+    reason: text("reason", { enum: ["earn", "redeem", "adjust", "return"] }).notNull(),
+    refId: uuid("ref_id"),
+    note: text("note"),
+    actorId: uuid("actor_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.storeId, t.id] }),
+    foreignKey({ columns: [t.storeId, t.customerId], foreignColumns: [customers.storeId, customers.id] }),
+    index("loyalty_ledger_customer").on(t.storeId, t.customerId),
+  ],
+);
+
+export const coupons = pgTable(
+  "coupons",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    code: text("code").notNull(),
+    kind: text("kind", { enum: ["percent", "fixed"] }).notNull(),
+    value: integer("value").notNull(),
+    minSpendPoisha: bigint("min_spend_poisha", { mode: "number" }).notNull().default(0),
+    maxDiscountPoisha: bigint("max_discount_poisha", { mode: "number" }),
+    validUntil: date("valid_until", { mode: "string" }),
+    maxUses: integer("max_uses"),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] }), uniqueIndex("coupons_store_code").on(t.storeId, t.code)],
+);
+
+export const giftCards = pgTable(
+  "gift_cards",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    code: text("code").notNull(),
+    initialPoisha: poisha("initial_poisha"),
+    customerId: uuid("customer_id"),
+    expiresOn: date("expires_on", { mode: "string" }),
+    soldMethod: text("sold_method").notNull(),
+    soldRef: text("sold_ref"),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] }), uniqueIndex("gift_cards_store_code").on(t.storeId, t.code)],
+);
+
+/** Append-only: a card's balance is its first load plus these entries (spending is negative). */
+export const giftCardLedger = pgTable(
+  "gift_card_ledger",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull().defaultRandom(),
+    giftCardId: uuid("gift_card_id").notNull(),
+    amountPoisha: bigint("amount_poisha", { mode: "number" }).notNull(),
+    saleId: uuid("sale_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] }), index("gift_card_ledger_card").on(t.storeId, t.giftCardId)],
+);
+
+export const expenses = pgTable(
+  "expenses",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    branchId: uuid("branch_id").notNull(),
+    category: text("category").notNull(),
+    amountPoisha: poisha("amount_poisha"),
+    method: text("method").notNull(),
+    ref: text("ref"),
+    note: text("note"),
+    spentOn: date("spent_on", { mode: "string" }).notNull(),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] }), index("expenses_store_date").on(t.storeId, t.spentOn)],
 );

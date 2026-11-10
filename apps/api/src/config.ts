@@ -56,6 +56,21 @@ export const config = {
   mailboxes: (process.env.MAILBOXES ?? "hello,support,billing").split(",").map((m) => m.trim().toLowerCase()).filter(Boolean),
   /** Postal posts incoming mail with this in the URL. The inbound endpoint doesn't exist until it is set. */
   mailWebhookToken: process.env.MAIL_WEBHOOK_TOKEN ?? (isProduction ? null : "local-mail-token"),
+  /**
+   * Cloudflare R2 for product photos, inbox attachments and backups. Without it, files stay in a
+   * local folder, which is fine for development but has no off-server copy.
+   */
+  r2:
+    process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET
+      ? { accountId: process.env.R2_ACCOUNT_ID, accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY, bucket: process.env.R2_BUCKET }
+      : null,
+  /** Backups are encrypted with this before they leave the server. Lose it and the backups can't be read. */
+  backupPassphrase: process.env.BACKUP_PASSPHRASE ?? null,
+  /** Daily backups kept this many days; after that, one per month is kept for a year. */
+  backupDailyDays: Number(process.env.BACKUP_DAILY_DAYS ?? 14),
+  backupMonthlyMonths: Number(process.env.BACKUP_MONTHLY_MONTHS ?? 12),
+  /** Files attached to incoming mail are deleted after this many days. The message text stays. */
+  attachmentRetentionDays: Number(process.env.ATTACHMENT_RETENTION_DAYS ?? 730),
   /** The public demo store, reset on a schedule by `pnpm demo:reset`. Off in production unless set. */
   demoSubdomain: process.env.DEMO_SUBDOMAIN ?? (isProduction ? null : "demo"),
   port: Number(process.env.API_PORT ?? 8787),

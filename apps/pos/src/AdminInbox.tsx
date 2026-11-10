@@ -87,6 +87,18 @@ export function AdminInbox({ session, onUnread }: { session: string; onUnread: (
     else await loadList(box, 1);
   }
 
+  /** Fetched with the session header, then saved by the browser. A plain link can't carry the header. */
+  async function download(id: string, n: number, filename: string) {
+    const res = await fetch(`/v1/platform/mail/${id}/attachments/${n}`, { headers }).catch(() => null);
+    if (!res?.ok) return setError("Could not download that file.");
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
   async function markUnread(id: string) {
     await fetch(`/v1/platform/mail/${id}/unread`, { method: "POST", headers }).catch(() => null);
     setOpen(null);
@@ -128,7 +140,21 @@ export function AdminInbox({ session, onUnread }: { session: string; onUnread: (
               <span className="text-sm font-bold text-muted">{when(m.createdAt)}{m.sentBy ? ` · sent by ${m.sentBy}` : ""} · {m.direction === "in" ? `to ${m.toAddress}` : "sent"}</span>
             </header>
             {m.htmlBody ? <HtmlBody html={m.htmlBody} /> : <pre className="font-sans whitespace-pre-wrap break-words">{m.textBody}</pre>}
-            {m.attachments.length > 0 && <p className="text-sm font-bold text-muted">Attachments (not kept): {m.attachments.map((a) => a.filename).join(", ")}</p>}
+            {m.attachments.length > 0 && (
+              <ul className="flex flex-wrap gap-2">
+                {m.attachments.map((a, n) => (
+                  <li key={n}>
+                    {a.stored ? (
+                      <button type="button" className="min-h-10 border-2 border-line px-3 text-sm font-bold" onClick={() => void download(m.id, n, a.filename)}>
+                        📎 {a.filename} · {Math.max(1, Math.round(a.size / 1024))} KB
+                      </button>
+                    ) : (
+                      <span className="text-sm font-bold text-muted">📎 {a.filename} (not kept)</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
             <button className={small} onClick={() => reply(m)}>Reply</button>
           </article>
         ))}

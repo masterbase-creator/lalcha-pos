@@ -20,13 +20,28 @@ import {
   unitLabel,
   type StoreSettings,
   type Sale,
+  categoryLabel,
+  couponDiscount,
+  dueByMethod,
+  hasFeature,
+  pointsEarned,
+  type CouponRecord,
+  type Modifier,
+  type TableRecord,
 } from "@lalcha/domain";
+import { AccountsScreen } from "./AccountsScreen";
+import { ExpiryScreen } from "./ExpiryScreen";
+import { LoyaltyScreen } from "./LoyaltyScreen";
+import { Onboarding } from "./Onboarding";
+import { WarrantyScreen } from "./WarrantyScreen";
+import { openDrawer, printDirect, type Line as PrintLine } from "./escpos";
+import { apiFetch } from "./session";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { strings, type StringKey } from "./i18n";
 import { ShiftDialog } from "./ShiftDialog";
 import { AuditScreen } from "./AuditScreen";
 import { BranchesScreen } from "./BranchesScreen";
-import { addLocalCustomer, getStoreName, loadBranchName, loadCustomers, loadProducts, loadSettings, loadSubscription, recordSale } from "./local";
+import { addLocalCustomer, getStoreName, loadBranchName, loadCoupons, loadCustomers, loadOpenOrders, loadProducts, loadSettings, loadSubscription, loadTables, recordSale, saveOpenOrders, type OpenOrder } from "./local";
 import { SettingsScreen } from "./SettingsScreen";
 import { BillingScreen } from "./BillingScreen";
 import { BakiScreen } from "./BakiScreen";
@@ -42,11 +57,22 @@ import { StaffScreen } from "./StaffScreen";
 import { getSyncState, refreshQueueCounts, subscribeSync, syncFresh, syncNow } from "./sync";
 import { groupTiles, isPack, toSellables, type Sellable } from "./sellables";
 
-type CartLine = { product: Sellable; qty: number };
+/**
+ * One line on the bill. The same product can sit on two lines when its extras differ (a burger with
+ * cheese and one without) or, for serial-tracked goods, one line per piece.
+ */
+type CartLine = { key: string; product: Sellable; qty: number; note: string | null; extraPoisha: number; serials: string[] };
+const unitPrice = (l: CartLine) => l.product.pricePoisha + l.extraPoisha;
 
-type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "branches" | "audit" | "staff" | "billing" | "settings";
-const MANAGER_VIEWS: View[] = ["sell", "products", "purchase", "baki", "returns", "reports", "branches", "audit", "staff"];
-const CASHIER_VIEWS: View[] = ["sell", "baki"];
+type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "expiry" | "warranty" | "loyalty" | "accounts" | "branches" | "audit" | "staff" | "billing" | "settings";
+/** The menu follows what the store switched on: a grocery never sees Warranty, a pharmacy sees Expiry. */
+function viewsFor(role: string, s: StoreSettings): View[] {
+  const optional: [View, boolean][] = [["expiry", hasFeature(s, "batches")], ["warranty", hasFeature(s, "serials")], ["loyalty", hasFeature(s, "loyalty")], ["accounts", hasFeature(s, "accounting")]];
+  const extra = optional.filter(([, on]) => on).map(([v]) => v);
+  if (role === "cashier") return ["sell", "baki", ...(hasFeature(s, "serials") ? (["warranty"] as View[]) : [])];
+  const manager: View[] = ["sell", "products", "purchase", "baki", "returns", "reports", ...extra, "branches", "audit", "staff"];
+  return role === "owner" ? [...manager, "billing", "settings"] : manager;
+}
 /** Shown inside another page, such as the demo on the website: grabbing focus there would scroll that page. */
 const EMBEDDED = window.self !== window.top;
 
@@ -74,6 +100,16 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   const [weighing, setWeighing] = useState<{ product: Sellable; qty: number | null } | null>(null);
   const [receipt, setReceipt] = useState<Sale | null>(null);
   const [notice, setNotice] = useState("");
+  const [coupons, setCoupons] = useState<CouponRecord[]>([]);
+  const [couponCode, setCouponCode] = useState<string | null>(null);
+  const [couponText, setCouponText] = useState("");
+  const [tables, setTables] = useState<TableRecord[]>([]);
+  const [orders, setOrders] = useState<OpenOrder[]>([]);
+  /** The restaurant order on screen: a table's key, "takeaway", or null for a plain counter sale. */
+  const [order, setOrder] = useState<{ key: string; tableName: string | null; orderType: OpenOrder["orderType"] } | null>(null);
+  const [extrasFor, setExtrasFor] = useState<Sellable | null>(null);
+  const [serialFor, setSerialFor] = useState<Sellable | null>(null);
+  const [kot, setKot] = useState<{ title: string; lines: CartLine[] } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const sync = useSyncExternalStore(subscribeSync, getSyncState);
 
@@ -91,7 +127,10 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
 
   const reload = useCallback(async () => {
     try {
-      const [items, store, people, sub, shop, branch] = await Promise.all([loadProducts(), getStoreName(), loadCustomers(), loadSubscription(), loadSettings(), loadBranchName()]);
+      const [items, store, people, sub, shop, branch, offers, tableList, open] = await Promise.all([loadProducts(), getStoreName(), loadCustomers(), loadSubscription(), loadSettings(), loadBranchName(), loadCoupons(), loadTables(), loadOpenOrders()]);
+      setCoupons(offers);
+      setTables(tableList);
+      setOrders(open);
       setBranchName(branch);
       setSettings(shop);
       setDataVersion((v) => v + 1);
@@ -115,30 +154,60 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
 
   const canManage = user.role !== "cashier";
   const plan = subscription ? subscriptionState(subscription) : null;
+  const views = viewsFor(user.role, settings);
   useEffect(() => {
-    if (!canManage) setView((v) => (CASHIER_VIEWS.includes(v) ? v : "sell"));
-  }, [canManage]);
+    setView((v) => (views.includes(v) ? v : "sell"));
+  }, [views.join()]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const add = useCallback((product: Sellable) => {
-    if (isLoose(product.unit)) {
-      setWeighing({ product, qty: null });
-      return;
-    }
+  /** Adds one more of a plain line, or starts it. */
+  const addPlain = useCallback((product: Sellable, note: string | null = null, extraPoisha = 0) => {
+    const key = `${product.id}|${note ?? ""}`;
     setCart((c) => {
-      const found = c.find((l) => l.product.id === product.id);
+      const found = c.find((l) => l.key === key);
       if (found) return c.map((l) => (l === found ? { ...l, qty: l.qty + QTY_SCALE } : l));
-      return [{ product, qty: QTY_SCALE }, ...c];
+      return [{ key, product, qty: QTY_SCALE, note, extraPoisha, serials: [] }, ...c];
     });
   }, []);
 
+  const add = useCallback(
+    (product: Sellable) => {
+      if (isLoose(product.unit)) return setWeighing({ product, qty: null });
+      // Phones and other serial-tracked goods: one scan per piece, so the receipt and warranty name it.
+      if (product.tracking === "serial" && hasFeature(settings, "serials") && !isPack(product)) return setSerialFor(product);
+      if (product.modifiers?.length && hasFeature(settings, "restaurant")) return setExtrasFor(product);
+      addPlain(product);
+    },
+    [addPlain, settings],
+  );
+
+  function addSerial(product: Sellable, serial: string) {
+    setCart((c) => {
+      const found = c.find((l) => l.product.id === product.id && l.serials.length);
+      if (found) return c.map((l) => (l === found ? { ...l, qty: l.qty + QTY_SCALE, serials: [...l.serials, serial] } : l));
+      return [{ key: `${product.id}|serial`, product, qty: QTY_SCALE, note: null, extraPoisha: 0, serials: [serial] }, ...c];
+    });
+  }
+
   function setLooseQty(product: Sellable, qty: number) {
-    setCart((c) => (c.some((l) => l.product.id === product.id) ? c.map((l) => (l.product.id === product.id ? { ...l, qty } : l)) : [{ product, qty }, ...c]));
+    const key = `${product.id}|`;
+    setCart((c) => (c.some((l) => l.key === key) ? c.map((l) => (l.key === key ? { ...l, qty } : l)) : [{ key, product, qty, note: null, extraPoisha: 0, serials: [] }, ...c]));
     setWeighing(null);
   }
 
-  const changeQty = (id: string, pieces: number) =>
-    setCart((c) => c.flatMap((l) => (l.product.id !== id ? [l] : l.qty + pieces * QTY_SCALE > 0 ? [{ ...l, qty: l.qty + pieces * QTY_SCALE }] : [])));
-  const removeLine = (id: string) => setCart((c) => c.filter((l) => l.product.id !== id));
+  // A serial line shrinks by dropping its last scanned serial; it only grows by scanning another.
+  const changeQty = (key: string, pieces: number) =>
+    setCart((c) =>
+      c.flatMap((l) => {
+        if (l.key !== key) return [l];
+        if (l.serials.length && pieces > 0) {
+          setSerialFor(l.product);
+          return [l];
+        }
+        const qty = l.qty + pieces * QTY_SCALE;
+        return qty > 0 ? [{ ...l, qty, serials: l.serials.length ? l.serials.slice(0, qty / QTY_SCALE) : l.serials }] : [];
+      }),
+    );
+  const removeLine = (key: string) => setCart((c) => c.filter((l) => l.key !== key));
 
   const scan = useCallback(
     (code: string) => {
@@ -147,7 +216,8 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       const scaled = label && products?.find((p) => (p.barcode ?? "").replace(/^0+/, "") === label.itemCode.replace(/^0+/, ""));
       if (label && scaled) {
         const qty = settings.scaleMode === "weight" ? label.value : Math.round((label.value * QTY_SCALE) / scaled.pricePoisha);
-        setCart((c) => (c.some((l) => l.product.id === scaled.id) ? c.map((l) => (l.product.id === scaled.id ? { ...l, qty: l.qty + qty } : l)) : [{ product: scaled, qty }, ...c]));
+        const key = `${scaled.id}|`;
+        setCart((c) => (c.some((l) => l.key === key) ? c.map((l) => (l.key === key ? { ...l, qty: l.qty + qty } : l)) : [{ key, product: scaled, qty, note: null, extraPoisha: 0, serials: [] }, ...c]));
         setNotice("");
         return true;
       }
@@ -168,7 +238,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
     let last = 0;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || paying || receipt || view !== "sell" || getAuth().locked) return;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || paying || receipt || serialFor || extrasFor || view !== "sell" || getAuth().locked) return;
       const now = performance.now();
       if (now - last > 80) buffer = "";
       last = now;
@@ -182,7 +252,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [scan, paying, receipt, view]);
+  }, [scan, paying, receipt, view, serialFor, extrasFor]);
 
   const categories = useMemo(() => ["all", ...new Set(products?.map((p) => p.category))], [products]);
   const visible = useMemo(() => {
@@ -192,7 +262,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       (p) =>
         !isPack(p) &&
         (category === "all" || p.category === category) &&
-        (!q || [p.nameEn, p.nameBn, p.sku, p.barcode ?? ""].some((v) => v.toLowerCase().includes(q))),
+        (!q || [p.nameEn, p.nameBn, p.sku, p.barcode ?? "", p.genericName ?? ""].some((v) => v.toLowerCase().includes(q))),
     );
   }, [products, query, category]);
   const tiles = useMemo(
@@ -210,9 +280,21 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   }
 
   const rateOf = (p: CatalogProduct) => (settings.vatEnabled ? (p.vatRateBp ?? settings.vatRateBp) : 0);
-  const lines = cart.map((l) => ({ qty: l.qty, unitPricePoisha: l.product.pricePoisha, vatRateBp: rateOf(l.product) }));
+  const lines = cart.map((l) => ({ qty: l.qty, unitPricePoisha: unitPrice(l), vatRateBp: rateOf(l.product) }));
   const discountInput = Math.round(Number(discountText || 0) * 100);
-  const totals = computeBill(lines, Number.isFinite(discountInput) ? discountInput : 0, settings.vatInclusive);
+  const subtotal = lines.reduce((n, l) => n + lineAmount(l.qty, l.unitPricePoisha), 0);
+  const coupon = couponCode ? coupons.find((c) => c.code === couponCode) : undefined;
+  const couponOff = coupon ? (couponDiscount(coupon, subtotal) ?? 0) : 0;
+  const totals = computeBill(lines, (Number.isFinite(discountInput) ? discountInput : 0) + couponOff, settings.vatInclusive);
+
+  function applyCoupon() {
+    const code = couponText.trim().toUpperCase();
+    const found = coupons.find((c) => c.code === code);
+    if (!found || couponDiscount(found, subtotal) === null) return setNotice(t("couponInvalid"));
+    setCouponCode(code);
+    setCouponText("");
+    setNotice("");
+  }
   const count = cart.reduce((n, l) => n + (isLoose(l.product.unit) ? 1 : l.qty / QTY_SCALE), 0);
 
   function onSearchEnter() {
@@ -229,6 +311,8 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
 
   function resetSale() {
     setCart([]);
+    setCouponCode(null);
+    setOrder(null);
     setDiscountText("");
     setReceipt(null);
     setPaying(false);
@@ -252,7 +336,50 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
     return id;
   }
 
-  async function completeSale(method: PaymentMethod, tenderedPoisha: number, paymentRef: string | null, customerId: string | null, bakiPaidMethod: "cash" | "bkash" | "nagad") {
+  /* ---------- Restaurant: open orders kept on this device ---------- */
+
+  async function storeOrders(next: OpenOrder[]) {
+    setOrders(next);
+    await saveOpenOrders(next);
+  }
+
+  /** Saves what's on screen to its table (or takeaway ticket) and clears the screen for the next one. */
+  async function keepOpen() {
+    if (!order || cart.length === 0) return;
+    const existing = orders.find((o) => o.key === order.key);
+    const saved: OpenOrder = { key: order.key, tableName: order.tableName, orderType: order.orderType, openedAt: existing?.openedAt ?? new Date().toISOString(), lines: cart, sent: existing?.sent ?? {} };
+    await storeOrders([...orders.filter((o) => o.key !== order.key), saved]);
+    setCart([]);
+    setOrder(null);
+    setNotice(t("orderKept"));
+  }
+
+  /** Opens a table: its saved order comes back onto the screen. */
+  async function openOrder(key: string, tableName: string | null, orderType: OpenOrder["orderType"]) {
+    if (order && cart.length) await keepOpen();
+    const saved = orders.find((o) => o.key === key);
+    setCart((saved?.lines as CartLine[] | undefined) ?? []);
+    setOrder({ key, tableName, orderType });
+    setNotice("");
+  }
+
+  /** Prints only what the kitchen hasn't seen yet, then remembers it was sent. */
+  async function sendToKitchen() {
+    if (!order) return;
+    const existing = orders.find((o) => o.key === order.key);
+    const sent = existing?.sent ?? {};
+    const fresh = cart.map((l) => ({ ...l, qty: l.qty - (sent[l.key] ?? 0) })).filter((l) => l.qty > 0);
+    if (!fresh.length) return setNotice(t("nothingNew"));
+    const title = order.tableName ? `${t("table")} ${order.tableName}` : t(order.orderType === "delivery" ? "delivery" : "takeaway");
+    if (settings.receiptPrinter === "direct") {
+      await printDirect(kitchenLines(title, fresh, lang), settings.paperWidth).catch(() => setKot({ title, lines: fresh }));
+    } else setKot({ title, lines: fresh });
+    const nextSent = Object.fromEntries(cart.map((l) => [l.key, l.qty]));
+    await storeOrders([...orders.filter((o) => o.key !== order.key), { key: order.key, tableName: order.tableName, orderType: order.orderType, openedAt: existing?.openedAt ?? new Date().toISOString(), lines: cart, sent: nextSent }]);
+    setNotice(t("sentToKitchen"));
+  }
+
+  async function completeSale(method: PaymentMethod, tenderedPoisha: number, paymentRef: string | null, customerId: string | null, bakiPaidMethod: "cash" | "bkash" | "nagad", rewards: Rewards) {
     const sale = await recordSale({
       cashierId: user.id,
       customerId,
@@ -261,11 +388,13 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
         productId: l.product.baseId,
         name: name(l.product, lang),
         qty: l.qty,
-        unitPricePoisha: l.product.pricePoisha,
+        unitPricePoisha: unitPrice(l),
         unit: l.product.unit,
         vatRateBp: rateOf(l.product),
         packQty: l.product.packQty,
         packName: l.product.packName,
+        note: l.note,
+        serials: l.serials,
       })),
       vatInclusive: settings.vatInclusive,
       vatPoisha: totals.vatPoisha,
@@ -274,9 +403,24 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       paymentMethod: method,
       tenderedPoisha,
       paymentRef,
+      pointsRedeemed: rewards.pointsRedeemed,
+      pointsPoisha: rewards.pointsPoisha,
+      giftCardCode: rewards.giftCardCode,
+      giftCardPoisha: rewards.giftCardPoisha,
+      couponCode: couponOff > 0 ? (couponCode ?? null) : null,
+      tableName: order?.tableName ?? null,
+      orderType: order?.orderType ?? null,
     });
+    if (order) await storeOrders(orders.filter((o) => o.key !== order.key));
     setPaying(false);
     setReceipt(sale);
+    if (settings.receiptPrinter === "direct") {
+      const customer = customers.find((c) => c.id === sale.customerId);
+      const earned = customer && hasFeature(settings, "loyalty") ? pointsEarned(sale.paymentMethod === "baki" ? sale.tenderedPoisha : dueByMethod(sale), settings.loyaltyEarnPoisha) : 0;
+      void printDirect(receiptLines(sale, { storeName, settings, cashierName: user.name, customerName: customer?.name ?? null, earned, lang, t, products: products ?? [] }), settings.paperWidth, {
+        openDrawer: settings.cashDrawer && (method === "cash" || (method === "baki" && bakiPaidMethod === "cash" && tenderedPoisha > 0)),
+      }).catch(() => setNotice(t("printerFailed")));
+    }
     await reload();
     await refreshQueueCounts();
     void syncNow();
@@ -328,7 +472,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       </header>
 
       <nav className="no-print flex shrink-0 overflow-x-auto border-b-[3px] border-line bg-panel font-black">
-        {(user.role === "owner" ? [...MANAGER_VIEWS, "billing" as const, "settings" as const] : canManage ? MANAGER_VIEWS : CASHIER_VIEWS).map((v) => (
+        {views.map((v) => (
           <button key={v} aria-pressed={view === v} className={`min-h-12 flex-1 px-4 whitespace-nowrap ${view === v ? "bg-text text-bg" : ""}`} onClick={() => setView(v)}>
             {t(v)}
           </button>
@@ -348,12 +492,22 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
           )}
         </div>
       )}
-      {view === "branches" ? (
+      {user.role === "owner" && !settings.onboarded && sync.catalogVersion > 0 ? (
+        <Onboarding settings={settings} lang={lang} t={t} onDone={syncFresh} />
+      ) : view === "expiry" ? (
+        <ExpiryScreen lang={lang} t={t} online={sync.online} alertDays={settings.expiryAlertDays} onChanged={syncFresh} />
+      ) : view === "warranty" ? (
+        <WarrantyScreen lang={lang} t={t} online={sync.online} />
+      ) : view === "loyalty" ? (
+        <LoyaltyScreen lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
+      ) : view === "accounts" ? (
+        <AccountsScreen lang={lang} t={t} online={sync.online} />
+      ) : view === "branches" ? (
         <BranchesScreen products={products ?? []} user={user} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : view === "audit" ? (
         <AuditScreen lang={lang} t={t} online={sync.online} />
       ) : view === "settings" ? (
-        <SettingsScreen settings={settings} t={t} online={sync.online} onChanged={syncFresh} />
+        <SettingsScreen key={dataVersion} settings={settings} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : view === "billing" ? (
         <BillingScreen lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : view === "sell" && plan?.status === "expired" ? (
@@ -371,11 +525,31 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       ) : view === "staff" ? (
         <StaffScreen user={user} lang={lang} t={t} online={sync.online} />
       ) : view === "products" ? (
-        <ProductsScreen products={(products ?? []).filter((p) => !isPack(p))} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
+        <ProductsScreen products={(products ?? []).filter((p) => !isPack(p))} settings={settings} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : (
       <div className="flex min-h-0 flex-1">
         <main className="no-print flex min-w-0 flex-1 flex-col">
           <div className="space-y-2 p-3 pb-2">
+            {hasFeature(settings, "restaurant") && (
+              <div className="flex gap-2 overflow-x-auto pb-1" data-testid="tables-bar">
+                <button aria-pressed={!order} onClick={() => { if (order) { void keepOpen(); setCart([]); } setOrder(null); }} className={`min-h-11 shrink-0 border-2 border-line px-3 font-black ${!order ? "bg-text text-bg" : "bg-panel"}`}>{t("counterSale")}</button>
+                <button aria-pressed={order?.orderType === "takeaway"} onClick={() => void openOrder(`takeaway-${Date.now()}`, null, "takeaway")} className="min-h-11 shrink-0 border-2 border-line bg-panel px-3 font-black">+ {t("takeaway")}</button>
+                {orders.filter((o) => !o.tableName).map((o) => (
+                  <button key={o.key} aria-pressed={order?.key === o.key} onClick={() => void openOrder(o.key, null, o.orderType)} className={`min-h-11 shrink-0 border-2 px-3 font-black ${order?.key === o.key ? "border-line bg-text text-bg" : "border-hot bg-panel"}`}>
+                    {t(o.orderType === "delivery" ? "delivery" : "takeaway")} {new Date(o.openedAt).toLocaleTimeString(lang === "bn" ? "bn-BD" : "en-GB", { hour: "2-digit", minute: "2-digit" })}
+                  </button>
+                ))}
+                {tables.length === 0 && <span className="self-center text-sm font-bold text-muted">{t("noTables")}</span>}
+                {tables.map((tb) => {
+                  const busy = orders.some((o) => o.key === `table-${tb.id}`);
+                  return (
+                    <button key={tb.id} aria-pressed={order?.key === `table-${tb.id}`} onClick={() => void openOrder(`table-${tb.id}`, tb.name, "dine_in")} className={`min-h-11 shrink-0 border-2 px-3 font-black ${order?.key === `table-${tb.id}` ? "border-line bg-text text-bg" : busy ? "border-hot bg-hot/15" : "border-line bg-panel"}`}>
+                      {tb.name}<span className="ml-1 text-xs">{busy ? "●" : ""}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <input
               ref={searchRef}
               autoFocus={!EMBEDDED}
@@ -399,7 +573,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
                     category === c ? "bg-text text-bg" : "bg-panel"
                   }`}
                 >
-                  {t(c as StringKey) ?? c}
+                  {c === "all" ? t("all") : categoryLabel(c, lang)}
                 </button>
               ))}
             </div>
@@ -420,6 +594,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
                   const inGroup = cart.filter((l) => l.product.groupKey === p.groupKey);
                   const inCart = many ? inGroup.length * QTY_SCALE : (inGroup[0]?.qty ?? 0);
                   const lowest = Math.min(...tile.options.map((o) => o.pricePoisha));
+                  const daysToExpiry = p.nextExpiry ? Math.round((Date.parse(p.nextExpiry) - Date.now()) / 86_400_000) : null;
                   return (
                     <button
                       key={p.id}
@@ -435,6 +610,11 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
                       )}
                       <div className="relative aspect-[4/3] w-full bg-tile">
                         <ProductImage product={p} lang={lang} />
+                        {daysToExpiry !== null && daysToExpiry <= settings.expiryAlertDays && (
+                          <span className={`absolute bottom-0 left-0 z-10 px-2 py-0.5 text-sm font-black ${daysToExpiry < 0 ? "bg-hot text-white" : "bg-[#ff7a52] text-[#12130f]"}`}>
+                            {daysToExpiry < 0 ? t("expired") : `${t("expiresOn")} ${new Date(p.nextExpiry!).toLocaleDateString(lang === "bn" ? "bn-BD" : "en-GB", { day: "numeric", month: "short" })}`}
+                          </span>
+                        )}
                       </div>
                       <div className="flex flex-1 flex-col gap-1 border-t-[3px] border-line p-2.5">
                         <span className="line-clamp-2 min-h-11 leading-snug font-bold">{many ? (lang === "bn" ? p.plainBn : p.plainEn) : name(p, lang)}</span>
@@ -483,27 +663,29 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
           <ul className="min-h-0 flex-1 overflow-y-auto">
             {cart.length === 0 && <li className="p-10 text-center text-lg font-bold text-muted">{t("empty")}</li>}
             {cart.map((l) => (
-              <li key={l.product.id} className="flex items-center gap-2.5 border-b-2 border-line/20 p-2.5">
+              <li key={l.key} className="flex items-center gap-2.5 border-b-2 border-line/20 p-2.5">
                 <div className="relative h-14 w-14 shrink-0 border-2 border-line bg-tile">
                   <ProductImage product={l.product} lang={lang} />
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-bold">{name(l.product, lang)}</p>
-                  <p className="text-sm font-bold text-muted">{money(l.product.pricePoisha)}</p>
+                  {l.note && <p className="truncate text-sm font-bold">+ {l.note}</p>}
+                  {l.serials.length > 0 && <p className="truncate font-mono text-xs font-bold text-muted">{l.serials.join(", ")}</p>}
+                  <p className="text-sm font-bold text-muted">{money(unitPrice(l))}</p>
                 </div>
                 {isLoose(l.product.unit) ? (
                   <div className="flex items-center gap-1">
                     <button data-testid="edit-weight" className="h-11 min-w-20 border-2 border-line px-2 font-black" onClick={() => setWeighing({ product: l.product, qty: l.qty })}>
                       {formatQty(l.qty, l.product.unit, lang)}
                     </button>
-                    <button aria-label={`${t("remove")}: ${name(l.product, lang)}`} className="h-11 w-11 border-2 border-line font-black" onClick={() => removeLine(l.product.id)}>✕</button>
+                    <button aria-label={`${t("remove")}: ${name(l.product, lang)}`} className="h-11 w-11 border-2 border-line font-black" onClick={() => removeLine(l.key)}>✕</button>
                   </div>
                 ) : (
                 <div className="flex items-center">
                   <button
                     aria-label={`${l.qty === QTY_SCALE ? t("remove") : t("decrease")}: ${name(l.product, lang)}`}
                     className="h-11 w-11 border-2 border-line text-xl font-black"
-                    onClick={() => changeQty(l.product.id, -1)}
+                    onClick={() => changeQty(l.key, -1)}
                   >
                     −
                   </button>
@@ -511,13 +693,13 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
                   <button
                     aria-label={`${t("increase")}: ${name(l.product, lang)}`}
                     className="h-11 w-11 border-2 border-line text-xl font-black"
-                    onClick={() => changeQty(l.product.id, 1)}
+                    onClick={() => changeQty(l.key, 1)}
                   >
                     +
                   </button>
                 </div>
                 )}
-                <span className="w-20 text-right font-black">{money(lineAmount(l.qty, l.product.pricePoisha))}</span>
+                <span className="w-20 text-right font-black">{money(lineAmount(l.qty, unitPrice(l)))}</span>
               </li>
             ))}
           </ul>
@@ -537,6 +719,19 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
                 className="h-11 w-32 border-2 border-line bg-bg px-2 text-right text-lg font-black"
               />
             </label>
+            {hasFeature(settings, "loyalty") && coupons.length > 0 && (
+              coupon ? (
+                <div className="flex items-center justify-between gap-2 font-bold">
+                  <span>{t("couponApplied")}: <span className="font-mono">{coupon.code}</span></span>
+                  <span className="flex items-center gap-2">−{money(couponOff)}<button className="min-h-9 px-1 underline" onClick={() => setCouponCode(null)}>{t("removeCoupon")}</button></span>
+                </div>
+              ) : (
+                <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); applyCoupon(); }}>
+                  <input aria-label={t("coupon")} placeholder={t("coupon")} value={couponText} onChange={(e) => setCouponText(e.target.value.toUpperCase())} className="h-11 min-w-0 flex-1 border-2 border-line bg-bg px-2 font-mono font-bold" />
+                  <button disabled={!couponText.trim() || cart.length === 0} className="min-h-11 border-2 border-line px-3 font-black disabled:opacity-40">{t("applyCoupon")}</button>
+                </form>
+              )
+            )}
           </div>
           {totals.vatPoisha > 0 && (
             <div className="flex justify-between border-t-2 border-line/20 p-3 font-bold">
@@ -551,12 +746,18 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
                 {money(totals.totalPoisha)}
               </span>
             </div>
+            {order && (
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button disabled={cart.length === 0} onClick={() => void keepOpen()} className="min-h-13 border-[3px] border-[#12130f] text-lg font-black disabled:opacity-40">{t("holdOrder")}</button>
+                <button disabled={cart.length === 0} onClick={() => void sendToKitchen()} className="min-h-13 border-[3px] border-[#12130f] text-lg font-black disabled:opacity-40">{t("sendToKitchen")}</button>
+              </div>
+            )}
             <button
               disabled={cart.length === 0}
               onClick={() => setPaying(true)}
               className="mt-3 min-h-16 w-full bg-[#12130f] text-2xl font-black text-accent disabled:opacity-40"
             >
-              {t("pay")}
+              {t("pay")}{order?.tableName ? ` · ${order.tableName}` : ""}
             </button>
           </div>
         </aside>
@@ -603,8 +804,17 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       {weighing && (
         <WeighDialog product={weighing.product} initial={weighing.qty} lang={lang} t={t} onCancel={() => setWeighing(null)} onConfirm={(qty) => setLooseQty(weighing.product, qty)} />
       )}
-      {paying && <PayDialog total={totals.totalPoisha} lang={lang} t={t} canOverride={canManage} customers={customers} online={sync.online} onAddCustomer={addCustomer} onCancel={() => setPaying(false)} onConfirm={completeSale} />}
-      {receipt && <Receipt sale={receipt} storeName={storeName} settings={settings} cashierName={user.name} customerName={customers.find((c) => c.id === receipt.customerId)?.name ?? null} lang={lang} t={t} onNew={resetSale} />}
+      {extrasFor && <ExtrasDialog product={extrasFor} lang={lang} t={t} onCancel={() => setExtrasFor(null)} onConfirm={(note, extra) => { addPlain(extrasFor, note, extra); setExtrasFor(null); }} />}
+      {serialFor && <SerialDialog product={serialFor} taken={cart.flatMap((l) => l.serials)} lang={lang} t={t} online={sync.online} onCancel={() => setSerialFor(null)} onConfirm={(serial) => { addSerial(serialFor, serial); setSerialFor(null); }} />}
+      {kot && <KitchenTicket title={kot.title} lines={kot.lines} lang={lang} t={t} onClose={() => setKot(null)} />}
+      {paying && <PayDialog total={totals.totalPoisha} lang={lang} t={t} settings={settings} canOverride={canManage} customers={customers} online={sync.online} onAddCustomer={addCustomer} onCancel={() => setPaying(false)} onConfirm={completeSale} />}
+      {receipt && (
+        <Receipt
+          sale={receipt} storeName={storeName} settings={settings} cashierName={user.name} customerName={customers.find((c) => c.id === receipt.customerId)?.name ?? null} lang={lang} t={t} onNew={resetSale}
+          products={products ?? []}
+          earned={receipt.customerId && hasFeature(settings, "loyalty") ? pointsEarned(receipt.paymentMethod === "baki" ? receipt.tenderedPoisha : dueByMethod(receipt), settings.loyaltyEarnPoisha) : 0}
+        />
+      )}
     </div>
   );
 }
@@ -671,10 +881,13 @@ function WeighDialog({
   );
 }
 
+type Rewards = { pointsRedeemed: number; pointsPoisha: number; giftCardCode: string | null; giftCardPoisha: number };
+
 function PayDialog({
   total,
   lang,
   t,
+  settings,
   customers,
   online,
   canOverride,
@@ -685,13 +898,15 @@ function PayDialog({
   total: number;
   lang: Lang;
   t: (k: StringKey) => string;
+  settings: StoreSettings;
   customers: CustomerSummary[];
   online: boolean;
   canOverride: boolean;
   onAddCustomer: (name: string, phone: string | null) => Promise<string>;
   onCancel: () => void;
-  onConfirm: (m: PaymentMethod, tendered: number, ref: string | null, customerId: string | null, bakiPaidMethod: "cash" | "bkash" | "nagad") => Promise<void>;
+  onConfirm: (m: PaymentMethod, tendered: number, ref: string | null, customerId: string | null, bakiPaidMethod: "cash" | "bkash" | "nagad", rewards: Rewards) => Promise<void>;
 }) {
+  const loyalty = hasFeature(settings, "loyalty");
   const [customerId, setCustomerId] = useState<string | null>(null);
   const [customerQuery, setCustomerQuery] = useState("");
   const [newCustomer, setNewCustomer] = useState<{ name: string; phone: string } | null>(null);
@@ -701,19 +916,30 @@ function PayDialog({
   const [cashText, setCashText] = useState("");
   const [ref, setRef] = useState("");
   const [busy, setBusy] = useState(false);
+  const [usePoints, setUsePoints] = useState(false);
+  const [cardText, setCardText] = useState("");
+  const [card, setCard] = useState<{ code: string; balancePoisha: number } | null>(null);
+  const [cardError, setCardError] = useState("");
   const money = (p: number) => formatTaka(p, lang);
 
-  const cash = cashText === "" ? total : Math.round(Number(cashText) * 100);
+  const chosenCustomer = customers.find((c) => c.id === customerId);
+  // Points are spent in whole points, never more than the bill.
+  const pointValue = settings.loyaltyPointPoisha;
+  const pointsRedeemed = loyalty && usePoints && chosenCustomer ? Math.min(chosenCustomer.points ?? 0, Math.floor(total / pointValue)) : 0;
+  const pointsPoisha = pointsRedeemed * pointValue;
+  const giftCardPoisha = card ? Math.min(card.balancePoisha, total - pointsPoisha) : 0;
+  const due = total - pointsPoisha - giftCardPoisha;
+
+  const cash = cashText === "" ? due : Math.round(Number(cashText) * 100);
   const bakiPaid = cashText === "" ? 0 : Math.round(Number(cashText) * 100);
-  const tendered = method === "cash" ? cash : method === "baki" ? bakiPaid : total;
-  const needsRef = requiresPaymentRef(method);
+  const tendered = method === "cash" ? cash : method === "baki" ? bakiPaid : due;
+  const needsRef = requiresPaymentRef(method) && due > 0;
   const valid =
     Number.isFinite(tendered) &&
-    (method === "baki" ? Boolean(customerId) && tendered <= total : tendered >= total) &&
+    (method === "baki" ? Boolean(customerId) && tendered <= due : tendered >= due) &&
     (!needsRef || ref.trim().length > 0);
-  const chosenCustomer = customers.find((c) => c.id === customerId);
   const overLimit =
-    method === "baki" && chosenCustomer?.creditLimitPoisha != null && chosenCustomer.duePoisha + Math.max(total - tendered, 0) > chosenCustomer.creditLimitPoisha;
+    method === "baki" && chosenCustomer?.creditLimitPoisha != null && chosenCustomer.duePoisha + Math.max(due - tendered, 0) > chosenCustomer.creditLimitPoisha;
   const blockedByLimit = overLimit && !canOverride;
   const customerMatches = customers
     .filter((c) => {
@@ -732,7 +958,22 @@ function PayDialog({
       setCustomerError(t("saveFailed"));
     }
   }
-  const quick = [...new Set([100, 500, 1000].map((n) => (Math.ceil(total / (n * 100)) || 1) * n))];
+
+  async function checkCard() {
+    const code = cardText.trim().toUpperCase();
+    if (!code) return;
+    setCardError("");
+    if (!online) return setCardError(t("giftCardNeedsOnline"));
+    const res = await apiFetch(`/v1/gift-cards/${encodeURIComponent(code)}`).catch(() => null);
+    if (!res?.ok) {
+      const body = (await res?.json().catch(() => null)) as { error?: string } | null;
+      const known = ["unknown_gift_card", "gift_card_disabled", "gift_card_expired"];
+      return setCardError(body?.error && known.includes(body.error) ? t(body.error as StringKey) : t("giftCardNeedsOnline"));
+    }
+    setCard((await res.json()) as { code: string; balancePoisha: number });
+  }
+
+  const quick = [...new Set([100, 500, 1000].map((n) => (Math.ceil(due / (n * 100)) || 1) * n))];
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -746,24 +987,66 @@ function PayDialog({
     if (!valid || busy || blockedByLimit) return;
     setBusy(true);
     try {
-      await onConfirm(method, tendered, method === "baki" || !ref.trim() ? null : ref.trim(), method === "baki" ? customerId : null, bakiPaidMethod);
+      await onConfirm(method, tendered, method === "baki" || !ref.trim() ? null : ref.trim(), method === "baki" || loyalty ? customerId : null, bakiPaidMethod, {
+        pointsRedeemed, pointsPoisha, giftCardCode: giftCardPoisha > 0 ? card!.code : null, giftCardPoisha,
+      });
     } finally {
       setBusy(false);
     }
   }
 
+  const showCustomer = method === "baki" || loyalty;
+  const picker = chosenCustomer ? (
+    <div className="flex items-center justify-between gap-2 border-[3px] border-line p-2">
+      <span className="min-w-0">
+        <span data-testid="chosen-customer" className="block truncate font-black">{chosenCustomer.name}</span>
+        <span className="block text-sm font-bold text-muted">
+          {t("due")}: {money(chosenCustomer.duePoisha)}{loyalty ? ` · ${formatNumber(chosenCustomer.points ?? 0, lang)} ${t("pointsAvailable")}` : ""}
+        </span>
+      </span>
+      <button type="button" className="min-h-11 shrink-0 px-2 font-bold underline" onClick={() => { setCustomerId(null); setUsePoints(false); }}>{t("changeUser")}</button>
+    </div>
+  ) : newCustomer ? (
+    <div className="grid grid-cols-2 gap-2">
+      <input autoFocus aria-label={t("customerName")} placeholder={t("customerName")} maxLength={120} value={newCustomer.name} onChange={(e) => setNewCustomer({ ...newCustomer, name: e.target.value })} className="h-12 min-w-0 border-[3px] border-line bg-bg px-2 font-bold" />
+      <input aria-label={t("phone")} placeholder="01XXXXXXXXX" inputMode="tel" maxLength={11} value={newCustomer.phone} onChange={(e) => setNewCustomer({ ...newCustomer, phone: e.target.value.replace(/\D/g, "") })} className="h-12 min-w-0 border-[3px] border-line bg-bg px-2 font-bold" />
+      <button type="button" className="min-h-12 border-[3px] border-line font-black" onClick={() => setNewCustomer(null)}>{t("cancel")}</button>
+      <button type="button" className="min-h-12 bg-[#12130f] font-black text-accent ring-2 ring-line" onClick={() => void saveNewCustomer()}>{t("save")}</button>
+    </div>
+  ) : (
+    <>
+      <div className="flex gap-2">
+        <input autoFocus={method === "baki"} aria-label={t("searchCustomer")} placeholder={method === "baki" ? t("searchCustomer") : `${t("customerOptional")}: ${t("searchCustomer")}`} value={customerQuery} onChange={(e) => setCustomerQuery(e.target.value)} className="h-12 min-w-0 flex-1 border-[3px] border-line bg-bg px-3 font-bold" />
+        <button type="button" aria-label={t("addCustomer")} className="h-12 w-14 shrink-0 border-[3px] border-line text-xl font-black disabled:opacity-40" onClick={() => setNewCustomer({ name: customerQuery, phone: "" })}>+</button>
+      </div>
+      {(method === "baki" || customerQuery.trim()) && (
+        <ul>
+          {customerMatches.map((c) => (
+            <li key={c.id}>
+              <button type="button" className="flex min-h-12 w-full items-center justify-between gap-2 border-b-2 border-line/20 px-1 text-left font-bold" onClick={() => setCustomerId(c.id)}>
+                <span className="truncate">{c.name}</span>
+                <span className="shrink-0 font-black">{method === "baki" ? money(c.duePoisha) : `${formatNumber(c.points ?? 0, lang)} ${t("pointsAvailable")}`}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {method === "baki" && customers.length === 0 && <p className="font-bold text-muted">{t("noCustomers")}</p>}
+    </>
+  );
+
   return (
     <div className="no-print fixed inset-0 z-40 flex items-end justify-center bg-black/60 sm:items-center" role="dialog" aria-modal="true" aria-label={t("pay")}>
       <form
-        className="w-full max-w-lg space-y-3 border-[3px] border-line bg-panel p-4"
+        className="max-h-full w-full max-w-lg space-y-3 overflow-y-auto border-[3px] border-line bg-panel p-4"
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
         }}
       >
         <div className="flex items-end justify-between bg-accent p-3 text-on-accent">
-          <span className="text-lg font-black">{t("total")}</span>
-          <span className="text-5xl leading-none font-black">{money(total)}</span>
+          <span className="text-lg font-black">{due !== total ? t("remainingToPay") : t("total")}</span>
+          <span className="text-5xl leading-none font-black">{money(due)}</span>
         </div>
         <div className="grid grid-cols-5 gap-1.5">
           {PAYMENT_METHODS.map((m) => (
@@ -782,43 +1065,36 @@ function PayDialog({
           ))}
         </div>
 
-        {method === "baki" ? (
-          <div className="space-y-2">
-            {chosenCustomer ? (
-              <div className="flex items-center justify-between gap-2 border-[3px] border-line p-2">
-                <span className="min-w-0">
-                  <span data-testid="chosen-customer" className="block truncate font-black">{chosenCustomer.name}</span>
-                  <span className="block text-sm font-bold text-muted">{t("due")}: {money(chosenCustomer.duePoisha)}</span>
+        {showCustomer && <div className="space-y-2">{picker}{customerError && <p role="alert" className="font-bold text-hot">{customerError}</p>}</div>}
+
+        {loyalty && (
+          <div className="space-y-2 border-2 border-line/30 p-2">
+            {chosenCustomer && (chosenCustomer.points ?? 0) > 0 && (
+              <label className="flex min-h-11 items-center justify-between gap-3 font-bold">
+                <span className="flex items-center gap-3">
+                  <input type="checkbox" className="h-6 w-6" checked={usePoints} onChange={(e) => setUsePoints(e.target.checked)} />
+                  {t("usePoints")} ({formatNumber(chosenCustomer.points ?? 0, lang)})
                 </span>
-                <button type="button" className="min-h-11 shrink-0 px-2 font-bold underline" onClick={() => setCustomerId(null)}>{t("changeUser")}</button>
-              </div>
-            ) : newCustomer ? (
-              <div className="grid grid-cols-2 gap-2">
-                <input autoFocus aria-label={t("customerName")} placeholder={t("customerName")} maxLength={120} value={newCustomer.name} onChange={(e) => setNewCustomer({ ...newCustomer, name: e.target.value })} className="h-12 min-w-0 border-[3px] border-line bg-bg px-2 font-bold" />
-                <input aria-label={t("phone")} placeholder="01XXXXXXXXX" inputMode="tel" maxLength={11} value={newCustomer.phone} onChange={(e) => setNewCustomer({ ...newCustomer, phone: e.target.value.replace(/\D/g, "") })} className="h-12 min-w-0 border-[3px] border-line bg-bg px-2 font-bold" />
-                <button type="button" className="min-h-12 border-[3px] border-line font-black" onClick={() => setNewCustomer(null)}>{t("cancel")}</button>
-                <button type="button" className="min-h-12 bg-[#12130f] font-black text-accent ring-2 ring-line" onClick={() => void saveNewCustomer()}>{t("save")}</button>
+                {pointsPoisha > 0 && <span className="font-black">−{money(pointsPoisha)}</span>}
+              </label>
+            )}
+            {card ? (
+              <div className="flex items-center justify-between gap-2 font-bold">
+                <span>{t("giftCard")} <span className="font-mono">{card.code}</span> · {t("cardBalance")} {money(card.balancePoisha)}</span>
+                <span className="flex items-center gap-2 font-black">−{money(giftCardPoisha)}<button type="button" className="min-h-9 px-1 font-bold underline" onClick={() => setCard(null)}>{t("removeCoupon")}</button></span>
               </div>
             ) : (
-              <>
-                <div className="flex gap-2">
-                  <input autoFocus aria-label={t("searchCustomer")} placeholder={t("searchCustomer")} value={customerQuery} onChange={(e) => setCustomerQuery(e.target.value)} className="h-12 min-w-0 flex-1 border-[3px] border-line bg-bg px-3 font-bold" />
-                  <button type="button" aria-label={t("addCustomer")} className="h-12 w-14 shrink-0 border-[3px] border-line text-xl font-black disabled:opacity-40" onClick={() => setNewCustomer({ name: customerQuery, phone: "" })}>+</button>
-                </div>
-                <ul>
-                  {customerMatches.map((c) => (
-                    <li key={c.id}>
-                      <button type="button" className="flex min-h-12 w-full items-center justify-between gap-2 border-b-2 border-line/20 px-1 text-left font-bold" onClick={() => setCustomerId(c.id)}>
-                        <span className="truncate">{c.name}</span>
-                        <span className="shrink-0 font-black">{money(c.duePoisha)}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                {customers.length === 0 && <p className="font-bold text-muted">{t("noCustomers")}</p>}
-              </>
+              <div className="flex gap-2">
+                <input aria-label={t("giftCardCode")} placeholder={t("giftCardCode")} value={cardText} onChange={(e) => setCardText(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void checkCard(); } }} className="h-11 min-w-0 flex-1 border-2 border-line bg-bg px-2 font-mono font-bold" />
+                <button type="button" disabled={!cardText.trim()} className="min-h-11 border-2 border-line px-3 font-black disabled:opacity-40" onClick={() => void checkCard()}>{t("checkCard")}</button>
+              </div>
             )}
-            {customerError && <p role="alert" className="font-bold text-hot">{customerError}</p>}
+            {cardError && <p role="alert" className="font-bold text-hot">{cardError}</p>}
+          </div>
+        )}
+
+        {method === "baki" ? (
+          <div className="space-y-2">
             <label className="block font-bold">
               {t("paidNow")}
               <input inputMode="decimal" value={cashText} onChange={(e) => setCashText(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0" className="mt-1 h-12 w-full border-[3px] border-line bg-bg px-3 text-right text-2xl font-black" />
@@ -833,7 +1109,7 @@ function PayDialog({
             {overLimit && <p role="alert" data-testid="limit-warning" className="font-bold text-hot">{canOverride ? t("overLimitWarn") : t("overLimitBlock")}</p>}
             <div className="flex items-end justify-between">
               <span className="text-lg font-black">{t("addToBaki")}</span>
-              <span data-testid="baki-amount" className={`text-3xl font-black ${tendered > total ? "text-hot" : ""}`}>{money(Math.max(total - tendered, 0))}</span>
+              <span data-testid="baki-amount" className={`text-3xl font-black ${tendered > due ? "text-hot" : ""}`}>{money(Math.max(due - tendered, 0))}</span>
             </div>
           </div>
         ) : method === "cash" ? (
@@ -841,16 +1117,16 @@ function PayDialog({
             <label className="block font-bold">
               {t("received")}
               <input
-                autoFocus
+                autoFocus={!loyalty}
                 inputMode="decimal"
                 value={cashText}
                 onChange={(e) => setCashText(e.target.value.replace(/[^0-9.]/g, ""))}
-                placeholder={String(total / 100)}
+                placeholder={String(due / 100)}
                 className="mt-1 h-14 w-full border-[3px] border-line bg-bg px-3 text-right text-3xl font-black"
               />
             </label>
             <div className="flex gap-2">
-              <button type="button" className="min-h-12 flex-1 border-2 border-line font-black" onClick={() => setCashText(String(total / 100))}>
+              <button type="button" className="min-h-12 flex-1 border-2 border-line font-black" onClick={() => setCashText(String(due / 100))}>
                 {t("exact")}
               </button>
               {quick.map((n) => (
@@ -861,21 +1137,15 @@ function PayDialog({
             </div>
             <div className="flex items-end justify-between">
               <span className="text-lg font-black">{t("change")}</span>
-              <span className={`text-4xl font-black ${tendered < total ? "text-hot" : ""}`}>{money(Math.max(tendered - total, 0))}</span>
+              <span className={`text-4xl font-black ${tendered < due ? "text-hot" : ""}`}>{money(Math.max(tendered - due, 0))}</span>
             </div>
           </>
-        ) : (
+        ) : due > 0 && method !== "card" ? (
           <label className="block font-bold">
             {t("ref")}
-            <input
-              autoFocus
-              value={ref}
-              maxLength={64}
-              onChange={(e) => setRef(e.target.value)}
-              className="mt-1 h-14 w-full border-[3px] border-line bg-bg px-3 text-xl font-black"
-            />
+            <input autoFocus={!loyalty} value={ref} maxLength={64} onChange={(e) => setRef(e.target.value)} className="mt-1 h-14 w-full border-[3px] border-line bg-bg px-3 text-xl font-black" />
           </label>
-        )}
+        ) : null}
 
         <div className="flex gap-2">
           <button type="button" className="min-h-16 flex-1 border-[3px] border-line text-lg font-black" onClick={onCancel}>
@@ -890,6 +1160,159 @@ function PayDialog({
   );
 }
 
+/** Extras for a dish: tick what the customer wants, add a note for the kitchen. */
+function ExtrasDialog({ product, lang, t, onCancel, onConfirm }: { product: Sellable; lang: Lang; t: (k: StringKey) => string; onCancel: () => void; onConfirm: (note: string | null, extraPoisha: number) => void }) {
+  const [chosen, setChosen] = useState<Modifier[]>([]);
+  const [note, setNote] = useState("");
+  const extra = chosen.reduce((n, m) => n + m.pricePoisha, 0);
+  const text = [...chosen.map((m) => m.name), note.trim()].filter(Boolean).join(", ");
+  return (
+    <div className="no-print fixed inset-0 z-40 flex items-end justify-center bg-black/60 sm:items-center" role="dialog" aria-modal="true" aria-label={t("chooseExtras")}>
+      <form className="max-h-full w-full max-w-md space-y-3 overflow-y-auto border-[3px] border-line bg-panel p-4" onSubmit={(e) => { e.preventDefault(); onConfirm(text || null, extra); }}>
+        <h2 className="text-2xl font-black">{name(product, lang)}</h2>
+        <p className="font-bold text-muted">{t("chooseExtras")}</p>
+        <div className="grid gap-2">
+          {(product.modifiers ?? []).map((m) => {
+            const on = chosen.some((c) => c.id === m.id);
+            return (
+              <button type="button" key={m.id} aria-pressed={on} onClick={() => setChosen((list) => (on ? list.filter((c) => c.id !== m.id) : [...list, m]))} className={`flex min-h-14 items-center justify-between border-[3px] px-3 text-lg font-black ${on ? "border-hot bg-hot/10" : "border-line bg-bg"}`}>
+                <span>{on ? "✓ " : ""}{m.name}</span>
+                <span>{m.pricePoisha ? `+${formatTaka(m.pricePoisha, lang)}` : ""}</span>
+              </button>
+            );
+          })}
+        </div>
+        <label className="block font-bold">{t("kitchenNote")}<input maxLength={120} value={note} onChange={(e) => setNote(e.target.value)} className="mt-1 h-12 w-full border-[3px] border-line bg-bg px-3 font-bold" /></label>
+        <div className="flex items-end justify-between bg-accent p-3 text-on-accent">
+          <span className="font-black">{t("total")}</span>
+          <span className="text-3xl font-black">{formatTaka(product.pricePoisha + extra, lang)}</span>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" className="min-h-14 flex-1 border-[3px] border-line text-lg font-black" onClick={onCancel}>{t("cancel")}</button>
+          <button className="min-h-14 flex-[2] bg-[#12130f] text-xl font-black text-accent ring-2 ring-line">{t("addToBill")}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/** One scan per phone or appliance. Serials in stock are suggested; an unknown one is still allowed. */
+function SerialDialog({ product, taken, lang, t, online, onCancel, onConfirm }: { product: Sellable; taken: string[]; lang: Lang; t: (k: StringKey) => string; online: boolean; onCancel: () => void; onConfirm: (serial: string) => void }) {
+  const [serial, setSerial] = useState("");
+  const [inStock, setInStock] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!online) return;
+    void apiFetch(`/v1/products/${product.baseId}/serials`).then(async (r) => (r.ok ? setInStock(((await r.json()) as { serials: string[] }).serials) : undefined)).catch(() => undefined);
+  }, [product.baseId, online]);
+  const value = serial.trim();
+  const duplicate = taken.includes(value);
+  const suggestions = (inStock ?? []).filter((x) => !taken.includes(x) && (!value || x.toLowerCase().includes(value.toLowerCase()))).slice(0, 6);
+  return (
+    <div className="no-print fixed inset-0 z-40 flex items-end justify-center bg-black/60 sm:items-center" role="dialog" aria-modal="true" aria-label={t("enterSerial")}>
+      <form className="w-full max-w-md space-y-3 border-[3px] border-line bg-panel p-4" onSubmit={(e) => { e.preventDefault(); if (value && !duplicate) onConfirm(value); }}>
+        <h2 className="text-2xl font-black">{name(product, lang)}</h2>
+        <label className="block font-bold">{t("enterSerial")}<input autoFocus maxLength={64} value={serial} onChange={(e) => setSerial(e.target.value)} className="mt-1 h-14 w-full border-[3px] border-line bg-bg px-3 font-mono text-xl font-black" /></label>
+        {duplicate && <p role="alert" className="font-bold text-hot">{t("serialAlready")}</p>}
+        {value && inStock && !inStock.includes(value) && !duplicate && <p className="font-bold text-muted">{t("serialUnknown")}</p>}
+        {suggestions.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {suggestions.map((x) => <button type="button" key={x} className="min-h-11 border-2 border-line px-3 font-mono font-bold" onClick={() => onConfirm(x)}>{x}</button>)}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <button type="button" className="min-h-14 flex-1 border-[3px] border-line text-lg font-black" onClick={onCancel}>{t("cancel")}</button>
+          <button disabled={!value || duplicate} className="min-h-14 flex-[2] bg-[#12130f] text-xl font-black text-accent ring-2 ring-line disabled:opacity-40">{t("addToBill")}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/** A kitchen ticket for the browser print window: big type, items and notes only, no prices. */
+function KitchenTicket({ title, lines, lang, t, onClose }: { title: string; lines: CartLine[]; lang: Lang; t: (k: StringKey) => string; onClose: () => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(() => window.print(), 100);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" role="dialog" aria-modal="true" aria-label={t("kitchenTicket")}>
+      <div className="w-full max-w-sm">
+        <div id="receipt" className="border-[3px] border-line bg-panel p-4">
+          <p className="text-center font-black">{t("kitchenTicket")}</p>
+          <h2 className="text-center text-3xl font-black">{title}</h2>
+          <p className="mb-2 text-center">{new Date().toLocaleTimeString(lang === "bn" ? "bn-BD" : "en-GB", { hour: "2-digit", minute: "2-digit" })}</p>
+          {lines.map((l) => (
+            <div key={l.key} className="border-t-2 border-dashed border-line py-1.5">
+              <p className="text-xl font-black">{formatQty(l.qty, l.product.unit, lang)} × {name(l.product, lang)}</p>
+              {l.note && <p className="text-lg font-bold">→ {l.note}</p>}
+            </div>
+          ))}
+        </div>
+        <button autoFocus className="no-print mt-2 min-h-14 w-full bg-accent text-xl font-black text-on-accent" onClick={onClose}>{t("close")}</button>
+      </div>
+    </div>
+  );
+}
+
+type ReceiptContext = { storeName: string; settings: StoreSettings; cashierName: string; customerName: string | null; earned: number; lang: Lang; t: (k: StringKey) => string; products: Sellable[] };
+
+const warrantyMonthsOf = (products: Sellable[], productId: string) => products.find((p) => p.baseId === productId)?.warrantyMonths ?? null;
+function warrantyDate(soldAt: string, months: number, lang: Lang) {
+  const d = new Date(soldAt);
+  d.setMonth(d.getMonth() + months);
+  return d.toLocaleDateString(lang === "bn" ? "bn-BD" : "en-GB");
+}
+
+/** The same receipt as the screen, as lines for a thermal printer. */
+function receiptLines(sale: Sale, c: ReceiptContext): PrintLine[] {
+  const { t, lang, settings } = c;
+  const money = (p: number) => formatTaka(p, lang);
+  const subtotal = computeTotals(sale.lines, sale.discountPoisha).subtotalPoisha;
+  const out: PrintLine[] = [];
+  if (sale.vatPoisha > 0) out.push({ kind: "text", text: t("mushakTitle"), align: "center", bold: true, size: "small" });
+  out.push({ kind: "text", text: c.storeName, align: "center", bold: true, size: "large" });
+  for (const x of [settings.address, settings.phone, settings.bin ? `BIN: ${settings.bin}` : null]) if (x) out.push({ kind: "text", text: x, align: "center", size: "small" });
+  out.push({ kind: "text", text: `${new Date(sale.soldAt).toLocaleString(lang === "bn" ? "bn-BD" : "en-GB")} · #${sale.receiptNo}`, align: "center", size: "small" });
+  out.push({ kind: "text", text: `${t("servedBy")}: ${c.cashierName}${sale.tableName ? ` · ${t("table")} ${sale.tableName}` : ""}`, align: "center", size: "small" });
+  if (c.customerName) out.push({ kind: "text", text: `${t("customer")}: ${c.customerName}`, align: "center", bold: true });
+  out.push({ kind: "rule" });
+  for (const l of sale.lines) {
+    out.push({ kind: "pair", left: `${l.name} × ${formatQty(l.qty, l.unit, lang)}`, right: money(lineAmount(l.qty, l.unitPricePoisha)) });
+    if (l.note) out.push({ kind: "text", text: `  + ${l.note}`, size: "small" });
+    if (l.serials.length) {
+      const months = warrantyMonthsOf(c.products, l.productId);
+      out.push({ kind: "text", text: `  ${t("serialShort")}: ${l.serials.join(", ")}${months ? ` · ${t("warrantyUntil")} ${warrantyDate(sale.soldAt, months, lang)}` : ""}`, size: "small" });
+    }
+  }
+  out.push({ kind: "rule" });
+  if (sale.discountPoisha > 0) {
+    out.push({ kind: "pair", left: t("subtotal"), right: money(subtotal) });
+    out.push({ kind: "pair", left: `${t("discount")}${sale.couponCode ? ` (${sale.couponCode})` : ""}`, right: `−${money(sale.discountPoisha)}` });
+  }
+  out.push({ kind: "pair", left: t("total"), right: money(sale.totalPoisha), bold: true, size: "large" });
+  if (sale.vatPoisha > 0) out.push({ kind: "pair", left: sale.vatInclusive ? t("vatIncluded") : t("vatAdded"), right: money(sale.vatPoisha) });
+  if (sale.pointsPoisha > 0) out.push({ kind: "pair", left: t("paidByPoints"), right: money(sale.pointsPoisha) });
+  if (sale.giftCardPoisha > 0) out.push({ kind: "pair", left: t("paidByGiftCard"), right: money(sale.giftCardPoisha) });
+  out.push({ kind: "pair", left: `${t("paid")} (${t(sale.paymentMethod)})`, right: money(sale.tenderedPoisha) });
+  if (sale.paymentMethod === "baki") out.push({ kind: "pair", left: t("addToBaki"), right: money(dueByMethod(sale) - sale.tenderedPoisha), bold: true });
+  if (sale.paymentMethod === "cash") out.push({ kind: "pair", left: t("change"), right: money(sale.tenderedPoisha - dueByMethod(sale)) });
+  if (c.earned > 0) out.push({ kind: "text", text: `+${formatNumber(c.earned, lang)} ${t("pointsEarnedNote")}`, align: "center" });
+  out.push({ kind: "gap" }, { kind: "text", text: t("thanks"), align: "center", bold: true });
+  return out;
+}
+
+function kitchenLines(title: string, lines: CartLine[], lang: Lang): PrintLine[] {
+  return [
+    { kind: "text", text: title, align: "center", bold: true, size: "large" },
+    { kind: "text", text: new Date().toLocaleTimeString(lang === "bn" ? "bn-BD" : "en-GB", { hour: "2-digit", minute: "2-digit" }), align: "center" },
+    { kind: "rule" },
+    ...lines.flatMap((l): PrintLine[] => [
+      { kind: "text", text: `${formatQty(l.qty, l.product.unit, lang)} × ${name(l.product, lang)}`, bold: true, size: "large" },
+      ...(l.note ? [{ kind: "text" as const, text: `→ ${l.note}`, bold: true }] : []),
+    ]),
+  ];
+}
+
 function Receipt({
   sale,
   storeName,
@@ -899,6 +1322,8 @@ function Receipt({
   lang,
   t,
   onNew,
+  products,
+  earned,
 }: {
   sale: Sale;
   storeName: string;
@@ -908,13 +1333,21 @@ function Receipt({
   lang: Lang;
   t: (k: StringKey) => string;
   onNew: () => void;
+  products: Sellable[];
+  earned: number;
 }) {
   const money = (p: number) => formatTaka(p, lang);
   const totals = computeTotals(sale.lines, sale.discountPoisha);
+  const [printError, setPrintError] = useState("");
+  async function print() {
+    if (settings.receiptPrinter !== "direct") return window.print();
+    setPrintError("");
+    await printDirect(receiptLines(sale, { storeName, settings, cashierName, customerName, earned, lang, t, products }), settings.paperWidth).catch(() => setPrintError(t("printerFailed")));
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-3" role="dialog" aria-modal="true" aria-label={t("receipt")}>
       <div className="w-full max-w-sm">
-        <div id="receipt" className="border-[3px] border-line bg-panel p-4 text-sm">
+        <div id="receipt" className={`border-[3px] border-line bg-panel p-4 text-sm ${settings.paperWidth === 58 ? "receipt-58" : ""}`}>
           {sale.vatPoisha > 0 && <p className="text-center font-black">{t("mushakTitle")}</p>}
           <h2 className="text-center text-xl font-black">{storeName}</h2>
           {settings.address && <p className="text-center">{settings.address}</p>}
@@ -922,40 +1355,54 @@ function Receipt({
           {settings.bin && <p className="text-center font-bold">BIN: {settings.bin}</p>}
           <p className="text-center">{new Date(sale.soldAt).toLocaleString(lang === "bn" ? "bn-BD" : "en-GB")}</p>
           <p className="text-center font-bold">#{sale.receiptNo}</p>
-          <p className="mb-2 text-center">{t("servedBy")}: {cashierName}</p>
+          <p className="mb-2 text-center">{t("servedBy")}: {cashierName}{sale.tableName ? ` · ${t("table")} ${sale.tableName}` : ""}</p>
           {customerName && <p className="mb-2 text-center font-bold">{t("customer")}: {customerName}</p>}
           <div className="border-y-2 border-dashed border-line py-1">
-            {sale.lines.map((l, i) => (
-              <div key={i} className="flex justify-between gap-2 py-0.5">
-                <span>{l.name} × {formatQty(l.qty, l.unit, lang)}</span>
-                <span className="font-bold whitespace-nowrap">{money(lineAmount(l.qty, l.unitPricePoisha))}</span>
-              </div>
-            ))}
+            {sale.lines.map((l, i) => {
+              const months = l.serials.length ? warrantyMonthsOf(products, l.productId) : null;
+              return (
+                <div key={i} className="py-0.5">
+                  <div className="flex justify-between gap-2">
+                    <span>{l.name} × {formatQty(l.qty, l.unit, lang)}</span>
+                    <span className="font-bold whitespace-nowrap">{money(lineAmount(l.qty, l.unitPricePoisha))}</span>
+                  </div>
+                  {l.note && <p className="pl-2 text-xs">+ {l.note}</p>}
+                  {l.serials.length > 0 && <p className="pl-2 font-mono text-xs">{t("serialShort")}: {l.serials.join(", ")}{months ? ` · ${t("warrantyUntil")} ${warrantyDate(sale.soldAt, months, lang)}` : ""}</p>}
+                </div>
+              );
+            })}
           </div>
           {sale.discountPoisha > 0 && (
             <>
               <div className="mt-1 flex justify-between"><span>{t("subtotal")}</span><span>{money(totals.subtotalPoisha)}</span></div>
-              <div className="flex justify-between"><span>{t("discount")}</span><span>−{money(sale.discountPoisha)}</span></div>
+              <div className="flex justify-between"><span>{t("discount")}{sale.couponCode ? ` (${sale.couponCode})` : ""}</span><span>−{money(sale.discountPoisha)}</span></div>
             </>
           )}
           <div className="mt-1 flex justify-between text-2xl font-black"><span>{t("total")}</span><span>{money(sale.totalPoisha)}</span></div>
           {sale.vatPoisha > 0 && (
             <div className="flex justify-between font-bold"><span>{sale.vatInclusive ? t("vatIncluded") : t("vatAdded")} ({[...new Set(sale.lines.map((l) => l.vatRateBp).filter(Boolean))].map((r) => `${formatNumber(r / 100, lang)}%`).join(", ")})</span><span data-testid="receipt-vat">{money(sale.vatPoisha)}</span></div>
           )}
+          {sale.pointsPoisha > 0 && <div className="flex justify-between"><span>{t("paidByPoints")} ({formatNumber(sale.pointsRedeemed, lang)})</span><span>{money(sale.pointsPoisha)}</span></div>}
+          {sale.giftCardPoisha > 0 && <div className="flex justify-between"><span>{t("paidByGiftCard")}</span><span>{money(sale.giftCardPoisha)}</span></div>}
           <div className="flex justify-between"><span>{t("paid")} ({t(sale.paymentMethod)})</span><span>{money(sale.tenderedPoisha)}</span></div>
           {sale.paymentMethod === "baki" && (
-            <div className="flex justify-between text-lg font-black"><span>{t("addToBaki")}</span><span>{money(sale.totalPoisha - sale.tenderedPoisha)}</span></div>
+            <div className="flex justify-between text-lg font-black"><span>{t("addToBaki")}</span><span>{money(dueByMethod(sale) - sale.tenderedPoisha)}</span></div>
           )}
           {sale.paymentRef && <div className="flex justify-between gap-2"><span>{t("ref")}</span><span className="break-all">{sale.paymentRef}</span></div>}
           {sale.paymentMethod === "cash" && (
-            <div className="flex justify-between font-bold"><span>{t("change")}</span><span>{money(sale.tenderedPoisha - sale.totalPoisha)}</span></div>
+            <div className="flex justify-between font-bold"><span>{t("change")}</span><span>{money(sale.tenderedPoisha - dueByMethod(sale))}</span></div>
           )}
+          {earned > 0 && <p className="mt-2 text-center font-bold">+{formatNumber(earned, lang)} {t("pointsEarnedNote")}</p>}
           <p className="mt-3 text-center font-bold">{t("thanks")}</p>
         </div>
+        {printError && <p role="alert" className="no-print mt-2 bg-panel p-2 font-bold text-hot">{printError}</p>}
         <div className="no-print mt-2 flex gap-2">
-          <button className="min-h-16 flex-1 border-[3px] border-line bg-panel text-lg font-black" onClick={() => window.print()}>
+          <button className="min-h-16 flex-1 border-[3px] border-line bg-panel text-lg font-black" onClick={() => void print()}>
             {t("print")}
           </button>
+          {settings.receiptPrinter === "direct" && settings.cashDrawer && (
+            <button className="min-h-16 border-[3px] border-line bg-panel px-3 font-black" onClick={() => void openDrawer().catch(() => setPrintError(t("printerFailed")))}>{t("openDrawer")}</button>
+          )}
           <button autoFocus className="min-h-16 flex-[2] bg-accent text-xl font-black text-on-accent" onClick={onNew}>
             {t("newSale")}
           </button>

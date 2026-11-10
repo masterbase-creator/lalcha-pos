@@ -80,10 +80,10 @@ export function registerReports(app: Hono<Env>) {
 
         const received = await rows<{ method: string; amount: number }>(tx, sql`
           select case when payment_method = 'baki' then baki_paid_method else payment_method end as method,
-                 coalesce(sum(least(tendered_poisha, total_poisha)), 0)::float8 as amount
+                 coalesce(sum(least(tendered_poisha, total_poisha - points_poisha - gift_card_poisha)), 0)::float8 as amount
           from sales where store_id = ${storeId} ${only(sql`branch_id`)} and ${inRange(sql`sold_at`)} group by 1`);
         const [{ given }] = await rows<{ given: number }>(tx, sql`
-          select coalesce(sum(total_poisha - tendered_poisha), 0)::float8 as given
+          select coalesce(sum(total_poisha - points_poisha - gift_card_poisha - tendered_poisha), 0)::float8 as given
           from sales where store_id = ${storeId} ${only(sql`branch_id`)} and payment_method = 'baki' and ${inRange(sql`sold_at`)}`);
         const collected = await rows<{ method: string; amount: number }>(tx, sql`
           select method, sum(amount_poisha)::float8 as amount from customer_payments

@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type CatalogProduct, type CatalogResponse, type CustomerSummary, type Role, type Sale, type StaffMember, type StoreSettings, type SubscriptionInfo, type Unit, type OpKind, type Pack, type RecentSale, type ReportResponse, type SyncResult, computeBill, lineAmount, QTY_SCALE } from "@lalcha/domain";
+import { DEFAULT_SETTINGS, dueByMethod, type CouponRecord, type TableRecord, type CatalogProduct, type CatalogResponse, type CustomerSummary, type Role, type Sale, type StaffMember, type StoreSettings, type SubscriptionInfo, type Unit, type OpKind, type Pack, type RecentSale, type ReportResponse, type SyncResult, computeBill, lineAmount, QTY_SCALE } from "@lalcha/domain";
 import { v7 as uuidv7 } from "uuid";
 import type { Statement } from "./db.worker";
 
@@ -52,6 +52,7 @@ export async function loadProducts(): Promise<CatalogProduct[]> {
     variantOf: (r.variant_of as string | null) ?? null,
     variantName: (r.variant_name as string | null) ?? null,
     packs: JSON.parse((r.packs as string | null) ?? "[]") as Pack[],
+    ...(JSON.parse((r.extra as string | null) ?? "{}") as Pick<CatalogProduct, "tracking" | "warrantyMonths" | "genericName" | "modifiers" | "nextExpiry">),
     stock: (r.stock as number) - (sold.get(r.id as string) ?? 0),
   }));
 }
@@ -60,13 +61,18 @@ export async function saveCatalog(catalog: CatalogResponse) {
   await run([
     { sql: "DELETE FROM products" },
     ...catalog.products.map((p) => ({
-      sql: "INSERT INTO products (id, sku, barcode, name_en, name_bn, category, price_poisha, image_url, stock, unit, vat_rate_bp, variant_of, variant_name, packs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      bind: [p.id, p.sku, p.barcode, p.nameEn, p.nameBn, p.category, p.pricePoisha, p.imageUrl, p.stock, p.unit, p.vatRateBp, p.variantOf ?? null, p.variantName ?? null, JSON.stringify(p.packs ?? [])],
+      sql: "INSERT INTO products (id, sku, barcode, name_en, name_bn, category, price_poisha, image_url, stock, unit, vat_rate_bp, variant_of, variant_name, packs, extra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      bind: [
+        p.id, p.sku, p.barcode, p.nameEn, p.nameBn, p.category, p.pricePoisha, p.imageUrl, p.stock, p.unit, p.vatRateBp, p.variantOf ?? null, p.variantName ?? null, JSON.stringify(p.packs ?? []),
+        JSON.stringify({ tracking: p.tracking ?? "none", warrantyMonths: p.warrantyMonths ?? null, genericName: p.genericName ?? null, modifiers: p.modifiers ?? [], nextExpiry: p.nextExpiry ?? null }),
+      ],
     })),
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('store_name', ?)", bind: [catalog.store.name] },
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('branch', ?)", bind: [catalog.branch?.name ?? ""] },
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('settings', ?)", bind: [JSON.stringify(catalog.settings)] },
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('subscription', ?)", bind: [JSON.stringify(catalog.subscription)] },
+    { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('coupons', ?)", bind: [JSON.stringify(catalog.coupons ?? [])] },
+    { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('tables', ?)", bind: [JSON.stringify(catalog.tables ?? [])] },
   ]);
 }
 
@@ -127,8 +133,8 @@ export async function saveCustomers(customers: CustomerSummary[]) {
   await run([
     { sql: "DELETE FROM customers" },
     ...customers.map((c) => ({
-      sql: "INSERT INTO customers (id, name, phone, address, due_poisha, credit_limit_poisha) VALUES (?,?,?,?,?,?)",
-      bind: [c.id, c.name, c.phone, c.address, c.duePoisha, c.creditLimitPoisha],
+      sql: "INSERT INTO customers (id, name, phone, address, due_poisha, credit_limit_poisha, points) VALUES (?,?,?,?,?,?,?)",
+      bind: [c.id, c.name, c.phone, c.address, c.duePoisha, c.creditLimitPoisha, c.points ?? 0],
     })),
   ]);
 }
@@ -148,11 +154,13 @@ export async function loadCustomers(): Promise<CustomerSummary[]> {
     const amount = op.kind === "customer_payment" ? (p.amountPoisha ?? 0) : (p.creditPoisha ?? 0);
     if (id) extra.set(id, (extra.get(id) ?? 0) - amount);
   }
+  const spent = new Map<string, number>();
   for (const { payload } of pending) {
     const sale = JSON.parse(payload as string) as Sale;
     if (sale.paymentMethod === "baki" && sale.customerId) {
-      extra.set(sale.customerId, (extra.get(sale.customerId) ?? 0) + sale.totalPoisha - sale.tenderedPoisha);
+      extra.set(sale.customerId, (extra.get(sale.customerId) ?? 0) + dueByMethod(sale) - sale.tenderedPoisha);
     }
+    if (sale.customerId && sale.pointsRedeemed) spent.set(sale.customerId, (spent.get(sale.customerId) ?? 0) + sale.pointsRedeemed);
   }
   return rows.map((r) => ({
     id: r.id as string,
@@ -161,7 +169,25 @@ export async function loadCustomers(): Promise<CustomerSummary[]> {
     address: r.address as string | null,
     duePoisha: (r.due_poisha as number) + (extra.get(r.id as string) ?? 0),
     creditLimitPoisha: r.credit_limit_poisha as number | null,
+    // Points spent on sales the server hasn't seen yet can't be spent twice.
+    points: Math.max(0, ((r.points as number | null) ?? 0) - (spent.get(r.id as string) ?? 0)),
   }));
+}
+
+export async function loadCoupons(): Promise<CouponRecord[]> {
+  return JSON.parse((await getMeta("coupons")) ?? "[]") as CouponRecord[];
+}
+export async function loadTables(): Promise<TableRecord[]> {
+  return JSON.parse((await getMeta("tables")) ?? "[]") as TableRecord[];
+}
+
+/** A restaurant order kept open on this device: what's on it, and how much has gone to the kitchen. */
+export type OpenOrder = { key: string; tableName: string | null; orderType: "dine_in" | "takeaway" | "delivery"; openedAt: string; lines: unknown[]; sent: Record<string, number> };
+export async function loadOpenOrders(): Promise<OpenOrder[]> {
+  return JSON.parse((await getMeta("open_orders")) ?? "[]") as OpenOrder[];
+}
+export async function saveOpenOrders(orders: OpenOrder[]) {
+  await setMeta("open_orders", JSON.stringify(orders));
 }
 
 export async function getStoreName() {
@@ -263,7 +289,8 @@ export async function loadLocalSales(): Promise<LocalSale[]> {
     all.set(s.id, {
       id: s.id, receiptNo: s.receiptNo, soldAt: s.soldAt, totalPoisha: s.totalPoisha, tenderedPoisha: s.tenderedPoisha, discountPoisha: s.discountPoisha, vatPoisha: s.vatPoisha ?? 0,
       paymentMethod: s.paymentMethod, bakiPaidMethod: s.bakiPaidMethod ?? "cash", customerId: s.customerId, cashierName: null, returnedPoisha: 0, creditedPoisha: 0,
-      lines: s.lines.map((l, i) => ({ lineNo: i + 1, productId: l.productId, name: l.name, qty: l.qty, unitPricePoisha: l.unitPricePoisha, unit: l.unit ?? "pc", returnedQty: 0, finalPoisha: computeBill(s.lines, s.discountPoisha, s.vatInclusive ?? true).lines[i].finalPoisha })),
+      pointsPoisha: s.pointsPoisha ?? 0, giftCardPoisha: s.giftCardPoisha ?? 0,
+      lines: s.lines.map((l, i) => ({ lineNo: i + 1, productId: l.productId, name: l.name, qty: l.qty, unitPricePoisha: l.unitPricePoisha, unit: l.unit ?? "pc", returnedQty: 0, finalPoisha: computeBill(s.lines, s.discountPoisha, s.vatInclusive ?? true).lines[i].finalPoisha, note: l.note ?? null, serials: l.serials ?? [] })),
     });
   }
   for (const r of recent) {
@@ -306,8 +333,8 @@ export async function buildLocalReport(from: string, to: string): Promise<Report
     const d = daily.find((x) => x.date === dayOf(s.soldAt));
     if (d) { d.netPoisha += value; d.bills += 1; }
     const method = (s.paymentMethod === "baki" ? s.bakiPaidMethod : s.paymentMethod) as keyof typeof paid;
-    paid[method] += Math.min(s.tenderedPoisha, s.totalPoisha);
-    if (s.paymentMethod === "baki") baki += s.totalPoisha - s.tenderedPoisha;
+    paid[method] += Math.min(s.tenderedPoisha, dueByMethod(s));
+    if (s.paymentMethod === "baki") baki += dueByMethod(s) - s.tenderedPoisha;
     const who = s.cashierName ?? "—";
     const c = cashiers.get(who) ?? { name: who, bills: 0, salesPoisha: 0 };
     c.bills += 1; c.salesPoisha += s.totalPoisha;
@@ -346,7 +373,7 @@ export async function expectedCash(shift: LocalShift) {
   let cash = shift.floatPoisha;
   for (const r of sales) {
     const s = JSON.parse(r.payload as string) as Sale;
-    if (s.paymentMethod === "cash") cash += s.totalPoisha;
+    if (s.paymentMethod === "cash") cash += dueByMethod(s);
     if (s.paymentMethod === "baki" && (s.bakiPaidMethod ?? "cash") === "cash") cash += s.tenderedPoisha;
   }
   for (const r of ops) {
@@ -364,7 +391,7 @@ export async function clearDemoTill() {
     { sql: "DELETE FROM outbox" },
     { sql: "DELETE FROM recent_sales" },
     { sql: "DELETE FROM customers" },
-    { sql: "DELETE FROM meta WHERE k IN ('recent_since', 'receipt_seq', 'shift')" },
+    { sql: "DELETE FROM meta WHERE k IN ('recent_since', 'receipt_seq', 'shift', 'open_orders')" },
   ]);
 }
 

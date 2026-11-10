@@ -243,7 +243,40 @@ export function PurchaseScreen({
   );
 }
 
-type Draft = { product: CatalogProduct; qty: string; cost: string };
+type Arrival = { batchNo: string; expiresOn: string; serials: string };
+type Draft = { product: CatalogProduct; qty: string; cost: string } & Arrival;
+const noArrival: Arrival = { batchNo: "", expiresOn: "", serials: "" };
+const serialList = (text: string) => [...new Set(text.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean))];
+/** What goes to the server for a batch- or serial-tracked line, and whether it's complete. */
+function arrivalPayload(tracking: string | undefined, a: Arrival, qty: number) {
+  if (tracking === "batch") return { ok: Boolean(a.batchNo.trim()), fields: { batchNo: a.batchNo.trim() || null, expiresOn: a.expiresOn || null, serials: [] } };
+  if (tracking === "serial") {
+    const serials = serialList(a.serials);
+    return { ok: serials.length * QTY_SCALE === qty, fields: { batchNo: null, expiresOn: null, serials } };
+  }
+  return { ok: true, fields: { batchNo: null, expiresOn: null, serials: [] } };
+}
+
+/** Batch number and expiry, or one serial per piece, for goods arriving now. */
+function ArrivalFields({ tracking, value, t, onChange }: { tracking: string | undefined; value: Arrival; t: T; onChange: (a: Arrival) => void }) {
+  if (tracking === "batch") {
+    return (
+      <div className="grid w-full grid-cols-2 gap-2">
+        <label className="text-sm font-bold">{t("batchNo")}<input maxLength={60} value={value.batchNo} onChange={(e) => onChange({ ...value, batchNo: e.target.value })} className={field} /></label>
+        <label className="text-sm font-bold">{t("expiryDate")}<input type="date" value={value.expiresOn} onChange={(e) => onChange({ ...value, expiresOn: e.target.value })} className={field} /></label>
+      </div>
+    );
+  }
+  if (tracking === "serial") {
+    return (
+      <label className="block w-full text-sm font-bold">
+        {t("serialNumbers")} · {t("serialsHelp")}
+        <textarea rows={3} value={value.serials} onChange={(e) => onChange({ ...value, serials: e.target.value })} onKeyDown={(e) => e.stopPropagation()} className="mt-1 w-full border-[3px] border-line bg-bg px-3 py-2 font-mono font-bold" />
+      </label>
+    );
+  }
+  return null;
+}
 
 function NewPurchase({
   products, suppliers, lang, t, reloadSuppliers, onClose, onSaved,
@@ -285,7 +318,7 @@ function NewPurchase({
     setLines((current) => {
       const found = current.find((l) => l.product.id === product.id);
       if (found) return current.map((l) => (l === found ? { ...l, qty: String(Number(l.qty || 0) + 1) } : l));
-      return [{ product, qty: "1", cost: String((costs.get(product.id) ?? 0) / 100) }, ...current];
+      return [{ product, qty: "1", cost: String((costs.get(product.id) ?? 0) / 100), ...noArrival }, ...current];
     });
     setQuery("");
   }
@@ -298,7 +331,10 @@ function NewPurchase({
   }
 
   const update = (pid: string, patch: Partial<Draft>) => setLines((c) => c.map((l) => (l.product.id === pid ? { ...l, ...patch } : l)));
-  const payload = lines.map((l) => ({ productId: l.product.id, qty: Math.round(Number(l.qty || 0) * QTY_SCALE), unitCostPoisha: money(l.cost) }));
+  // A serial-tracked line counts its serials, so the quantity always matches what was scanned.
+  const qtyOf = (l: Draft) => (receiveNow && l.product.tracking === "serial" && serialList(l.serials).length ? serialList(l.serials).length * QTY_SCALE : Math.round(Number(l.qty || 0) * QTY_SCALE));
+  const payload = lines.map((l) => ({ productId: l.product.id, qty: qtyOf(l), unitCostPoisha: money(l.cost), ...(receiveNow ? arrivalPayload(l.product.tracking, l, qtyOf(l)).fields : {}) }));
+  const arrivalsOk = !receiveNow || lines.every((l) => arrivalPayload(l.product.tracking, l, qtyOf(l)).ok);
   const totals = computeTotals(payload.map((l) => ({ qty: l.qty, unitPricePoisha: l.unitCostPoisha })), money(discount));
   const validLines = lines.length > 0 && payload.every((l) => Number.isInteger(l.qty) && l.qty > 0 && Number.isFinite(l.unitCostPoisha));
   const paidPoisha = money(paid);
@@ -329,6 +365,7 @@ function NewPurchase({
     if (busy) return;
     if (!supplierId) return setError(t("unknown_supplier"));
     if (!validLines) return setError(t("no_lines"));
+    if (!arrivalsOk) return setError(lines.some((l) => l.product.tracking === "serial") ? t("serialCountMismatch") : t("batchRequired"));
     setBusy(true);
     setError("");
     const failure = await send("/v1/purchases", "POST", {
@@ -423,6 +460,7 @@ function NewPurchase({
             </label>
             <span className="w-24 self-center text-right font-black">{formatTaka(lineAmount(Math.round(Number(l.qty || 0) * QTY_SCALE), money(l.cost)), lang)}</span>
             <button type="button" aria-label={`${t("remove")}: ${name(l.product, lang)}`} className="h-12 w-12 border-2 border-line font-black" onClick={() => setLines((c) => c.filter((x) => x !== l))}>✕</button>
+            {receiveNow && <ArrivalFields tracking={l.product.tracking} value={l} t={t} onChange={(a) => update(l.product.id, a)} />}
           </li>
         ))}
       </ul>
@@ -464,6 +502,7 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmVoid, setConfirmVoid] = useState(false);
   const [arriving, setArriving] = useState<Record<number, string>>({});
+  const [arrivals, setArrivals] = useState<Record<number, Arrival>>({});
   const receiptId = useRef(uuidv7());
   const [confirmClose, setConfirmClose] = useState(false);
   const [back, setBack] = useState<Record<number, string>>({});
@@ -556,10 +595,13 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
             <>
               <h3 className="text-lg font-black">{t("arrivedNow")}</h3>
               {detail.lines.filter((l) => l.qty > l.receivedQty).map((l) => (
-                <label key={l.lineNo} className="flex items-center justify-between gap-3 font-bold">
-                  <span className="min-w-0 truncate">{name(l, lang)} · {formatQty(l.qty - l.receivedQty, l.unit, lang)}</span>
-                  <input aria-label={`${t("arrivedNow")}: ${name(l, lang)}`} inputMode="decimal" value={arriving[l.lineNo] ?? String((l.qty - l.receivedQty) / QTY_SCALE)} onChange={(e) => setArriving((a) => ({ ...a, [l.lineNo]: digits(e.target.value) }))} className="h-12 w-24 border-[3px] border-line bg-bg px-2 text-right font-black" />
-                </label>
+                <div key={l.lineNo} className="space-y-1 border-b-2 border-line/20 pb-2">
+                  <label className="flex items-center justify-between gap-3 font-bold">
+                    <span className="min-w-0 truncate">{name(l, lang)} · {formatQty(l.qty - l.receivedQty, l.unit, lang)}</span>
+                    <input aria-label={`${t("arrivedNow")}: ${name(l, lang)}`} inputMode="decimal" value={arriving[l.lineNo] ?? String((l.qty - l.receivedQty) / QTY_SCALE)} onChange={(e) => setArriving((a) => ({ ...a, [l.lineNo]: digits(e.target.value) }))} className="h-12 w-24 border-[3px] border-line bg-bg px-2 text-right font-black" />
+                  </label>
+                  <ArrivalFields tracking={l.tracking} value={arrivals[l.lineNo] ?? noArrival} t={t} onChange={(a) => setArrivals((all) => ({ ...all, [l.lineNo]: a }))} />
+                </div>
               ))}
               <PaymentFields t={t} lang={lang} paid={paid} setPaid={setPaid} method={method} setMethod={setMethod} reference={reference} setReference={setReference} full={detail.totalPoisha} />
               <button disabled={busy} className={`${primary} w-full`} onClick={() =>
@@ -567,7 +609,10 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
                     id: receiptId.current,
                     lines: detail.lines
                       .filter((l) => l.qty > l.receivedQty)
-                      .map((l) => ({ lineNo: l.lineNo, qty: Math.round(Number(arriving[l.lineNo] ?? (l.qty - l.receivedQty) / QTY_SCALE) * QTY_SCALE) }))
+                      .map((l) => {
+                        const qty = Math.round(Number(arriving[l.lineNo] ?? (l.qty - l.receivedQty) / QTY_SCALE) * QTY_SCALE);
+                        return { lineNo: l.lineNo, qty, ...arrivalPayload(l.tracking, arrivals[l.lineNo] ?? noArrival, qty).fields };
+                      })
                       .filter((l) => l.qty > 0),
                     paidPoisha: money(paid),
                     paymentMethod: method,

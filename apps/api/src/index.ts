@@ -1,5 +1,4 @@
 import { serve } from "@hono/node-server";
-import { serveStatic } from "@hono/node-server/serve-static";
 import {
   MAX_IMAGE_BYTES,
   computeBill,
@@ -9,6 +8,9 @@ import {
   saleSchema,
   syncRequestSchema,
   QTY_SCALE,
+  dueByMethod,
+  hasFeature,
+  pointsEarned,
   type CatalogResponse,
   type Pack,
   type ProductCreate,
@@ -16,13 +18,10 @@ import {
   type SyncResult,
 } from "@lalcha/domain";
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
 import { z } from "zod";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { fileURLToPath } from "node:url";
 import { managers, registerAuth, requireDevice } from "./auth.ts";
 import { config } from "./config.ts";
 import { audit, db, pgCode, withStore, type Env, type Tx } from "./db.ts";
@@ -34,7 +33,10 @@ import { registerDemo } from "./demo.ts";
 import { registerInbox } from "./inbox.ts";
 import { registerPurchases } from "./purchases.ts";
 import { registerReports } from "./reports.ts";
-import { auditLog, branches, productPacks, products, saleLines, sales, stockLedger, stores, users } from "./schema.ts";
+import { auditLog, branches, coupons, giftCardLedger, giftCards, loyaltyLedger, productPacks, products, restaurantTables, saleLines, sales, stockLedger, stores, users } from "./schema.ts";
+import { ensureBatch, receiveSerials, sellSerials, takeStock } from "./stock.ts";
+import { registerFeatures } from "./features.ts";
+import { registerStorage, saveProductImage, removeProductImage } from "./storage.ts";
 
 function subdomainFrom(host: string | undefined) {
   const hostname = (host ?? "").split(":")[0].toLowerCase();
@@ -49,7 +51,7 @@ function subdomainFrom(host: string | undefined) {
 const app = new Hono<Env>();
 
 app.get("/health", (c) => c.json({ ok: true }));
-app.use("/products/*", serveStatic({ root: fileURLToPath(new URL("../public", import.meta.url)) }));
+registerStorage(app);
 
 // Incoming mail can carry photos and PDFs, so its webhook gets more room than the till's requests.
 const smallBody = bodyLimit({ maxSize: 2 * 1024 * 1024 });
@@ -70,7 +72,7 @@ registerPublic(app);
 registerPlatform(app);
 registerInbox(app);
 registerDemo(app);
-for (const path of ["/v1/products", "/v1/products/*", "/v1/suppliers", "/v1/suppliers/*", "/v1/purchases", "/v1/purchases/*", "/v1/customers", "/v1/customers/*", "/v1/sales/*", "/v1/staff", "/v1/staff/*", "/v1/devices/*", "/v1/branches", "/v1/branches/*", "/v1/transfers", "/v1/transfers/*"]) {
+for (const path of ["/v1/products", "/v1/products/*", "/v1/suppliers", "/v1/suppliers/*", "/v1/purchases", "/v1/purchases/*", "/v1/customers", "/v1/customers/*", "/v1/sales/*", "/v1/staff", "/v1/staff/*", "/v1/devices/*", "/v1/branches", "/v1/branches/*", "/v1/transfers", "/v1/transfers/*", "/v1/batches/*", "/v1/tables", "/v1/tables/*", "/v1/coupons", "/v1/gift-cards", "/v1/gift-cards/*", "/v1/expenses", "/v1/expenses/*"]) {
   app.use(path, requireActiveSubscription);
 }
 registerAuth(app);
@@ -83,6 +85,7 @@ registerBranches(app);
 registerPurchases(app);
 registerCustomers(app);
 registerReports(app);
+registerFeatures(app);
 
 app.get("/v1/catalog", async (c) => {
   const store = c.get("store");
@@ -102,6 +105,10 @@ app.get("/v1/catalog", async (c) => {
         vatRateBp: products.vatRateBp,
         variantOf: products.variantOf,
         variantName: products.variantName,
+        tracking: products.tracking,
+        warrantyMonths: products.warrantyMonths,
+        genericName: products.genericName,
+        modifiers: products.modifiers,
         stock: sql<number>`coalesce(sum(${stockLedger.qtyDelta}), 0)::float8`,
       })
       .from(products)
@@ -115,8 +122,28 @@ app.get("/v1/catalog", async (c) => {
   );
   const packsOf = new Map<string, Pack[]>();
   for (const { productId, ...pack } of packs) packsOf.set(productId, [...(packsOf.get(productId) ?? []), pack]);
-  const list = rows.map((r) => ({ ...r, packs: packsOf.get(r.id) ?? [] }));
-  return c.json<CatalogResponse>({ store: { name: store.name }, products: list, subscription, settings, branch });
+  const [expiries, couponRows, tableRows] = await withStore(store.id, async (tx) => [
+    hasFeature(settings, "batches")
+      ? ((await tx.execute(sql`
+          select product_id, min(expires_on)::text as next_expiry from (
+            select b.product_id, b.expires_on from stock_batches b join stock_ledger l on l.store_id = b.store_id and l.batch_id = b.id
+            where b.store_id = ${store.id} and b.branch_id = ${device.branchId} and b.expires_on is not null
+            group by b.store_id, b.id having sum(l.qty_delta) > 0
+          ) x group by product_id`)) as unknown as { product_id: string; next_expiry: string }[])
+      : [],
+    hasFeature(settings, "loyalty")
+      ? await tx
+          .select({ id: coupons.id, code: coupons.code, kind: coupons.kind, value: coupons.value, minSpendPoisha: coupons.minSpendPoisha, maxDiscountPoisha: coupons.maxDiscountPoisha, validUntil: coupons.validUntil, maxUses: coupons.maxUses, active: coupons.active, uses: sql<number>`(select count(*)::int from sales s where s.store_id = ${coupons.storeId} and s.coupon_code = ${coupons.code})` })
+          .from(coupons)
+          .where(and(eq(coupons.storeId, store.id), eq(coupons.active, true)))
+      : [],
+    hasFeature(settings, "restaurant")
+      ? await tx.select({ id: restaurantTables.id, name: restaurantTables.name, area: restaurantTables.area, seats: restaurantTables.seats }).from(restaurantTables).where(and(eq(restaurantTables.storeId, store.id), isNull(restaurantTables.archivedAt))).orderBy(restaurantTables.area, restaurantTables.name)
+      : [],
+  ] as const);
+  const expiryOf = new Map(expiries.map((e) => [e.product_id, e.next_expiry]));
+  const list = rows.map((r) => ({ ...r, packs: packsOf.get(r.id) ?? [], nextExpiry: expiryOf.get(r.id) ?? null }));
+  return c.json<CatalogResponse>({ store: { name: store.name }, products: list, subscription, settings, branch, coupons: couponRows, tables: tableRows });
 });
 
 const UNIQUE_VIOLATION = "23505";
@@ -142,7 +169,23 @@ const fields = (p: ProductCreate | ProductUpdate) => ({
   vatRateBp: p.vatRateBp,
   variantOf: p.variantOf,
   variantName: p.variantOf ? p.variantName : p.variantName || null,
+  tracking: p.tracking,
+  warrantyMonths: p.warrantyMonths,
+  genericName: p.genericName,
+  modifiers: p.modifiers,
 });
+
+/** Opening stock for a new product, into its first batch or as its listed serials. */
+async function openingStock(tx: Tx, storeId: string, branchId: string, actorId: string, productId: string, input: ProductCreate) {
+  if (input.tracking === "serial" && input.openingSerials.length) {
+    await receiveSerials(tx, storeId, productId, branchId, input.openingSerials, null);
+    await tx.insert(stockLedger).values({ storeId, branchId, productId, qtyDelta: input.openingSerials.length * QTY_SCALE, reason: "opening", actorId });
+    return;
+  }
+  if (input.openingStock <= 0) return;
+  const batchId = input.tracking === "batch" && input.openingBatch ? await ensureBatch(tx, storeId, productId, branchId, input.openingBatch.batchNo, input.openingBatch.expiresOn) : null;
+  await tx.insert(stockLedger).values({ storeId, branchId, productId, qtyDelta: input.openingStock, reason: "opening", actorId, batchId });
+}
 
 /**
  * Points a variant at the top of its group, so groups stay one level deep. A product that already
@@ -196,9 +239,7 @@ app.post("/v1/products/import", async (c) => {
       try {
         await tx.transaction(async (row) => {
           await row.insert(products).values({ storeId: store.id, id, sku: `P-${id.slice(0, 8).toUpperCase()}`, ...fields(input.data) });
-          if (input.data.openingStock > 0) {
-            await row.insert(stockLedger).values({ storeId: store.id, branchId: c.get("device").branchId, productId: id, qtyDelta: input.data.openingStock, reason: "opening", actorId: c.get("user").id });
-          }
+          await openingStock(row, store.id, c.get("device").branchId, c.get("user").id, id, input.data);
         });
         results.push({ index, status: "created" });
       } catch (e) {
@@ -222,9 +263,7 @@ app.post("/v1/products", async (c) => {
       await tx.insert(products).values({ storeId: store.id, id, sku: `P-${id.slice(0, 8).toUpperCase()}`, ...fields(input.data), variantOf });
       await savePacks(tx, store.id, id, input.data.packs);
       await audit(tx, store.id, c.get("user").id, "product_create", id, { name: input.data.nameEn || input.data.nameBn });
-      if (input.data.openingStock > 0) {
-        await tx.insert(stockLedger).values({ storeId: store.id, branchId: c.get("device").branchId, productId: id, qtyDelta: input.data.openingStock, reason: "opening", actorId: c.get("user").id });
-      }
+      await openingStock(tx, store.id, c.get("device").branchId, c.get("user").id, id, input.data);
     });
   } catch (e) {
     if (e instanceof ApiError) return c.json({ error: e.code }, e.status);
@@ -247,7 +286,8 @@ app.get("/v1/products/:id", async (c) => {
       .select({
         id: products.id, sku: products.sku, barcode: products.barcode, nameEn: products.nameEn, nameBn: products.nameBn,
         category: products.category, pricePoisha: products.pricePoisha, costPoisha: products.costPoisha, imageUrl: products.imageUrl, unit: products.unit, vatRateBp: products.vatRateBp,
-        variantOf: products.variantOf, variantName: products.variantName,
+        variantOf: products.variantOf, variantName: products.variantName, tracking: products.tracking, warrantyMonths: products.warrantyMonths,
+        genericName: products.genericName, modifiers: products.modifiers,
       })
       .from(products)
       .where(activeProduct(store.id, id.data)),
@@ -272,8 +312,11 @@ app.patch("/v1/products/:id", async (c) => {
       if (updated.length === 0) return false;
       await savePacks(tx, store.id, id.data, input.data.packs);
       await audit(tx, store.id, c.get("user").id, "product_update", id.data, { name: input.data.nameEn || input.data.nameBn, pricePoisha: input.data.pricePoisha, costPoisha: input.data.costPoisha, stockAdjustment: input.data.stockAdjustment });
-      if (input.data.stockAdjustment !== 0) {
+      if (input.data.stockAdjustment > 0) {
         await tx.insert(stockLedger).values({ storeId: store.id, branchId: c.get("device").branchId, productId: id.data, qtyDelta: input.data.stockAdjustment, reason: "adjustment", actorId: c.get("user").id });
+      } else if (input.data.stockAdjustment < 0) {
+        // Stock taken out of a batch-tracked product leaves the oldest batches first.
+        await takeStock(tx, { storeId: store.id, branchId: c.get("device").branchId, productId: id.data, qty: -input.data.stockAdjustment, reason: "adjustment", refId: null, actorId: c.get("user").id }, input.data.tracking === "batch");
       }
       return true;
     });
@@ -307,8 +350,6 @@ function imageExtension(b: Buffer) {
   return null;
 }
 
-const imagesRoot = fileURLToPath(new URL("../public/products/", import.meta.url));
-
 app.put("/v1/products/:id/image", async (c) => {
   const store = c.get("store");
   const id = uuidParam.safeParse(c.req.param("id"));
@@ -319,12 +360,7 @@ app.put("/v1/products/:id/image", async (c) => {
   if (!ext) return c.json({ error: "invalid_image" }, 415);
 
   // Every upload gets a new name, so devices holding the old picture fetch the new one.
-  const fileName = `${randomUUID()}.${ext}`;
-  const storeDir = join(imagesRoot, store.id);
-  await mkdir(storeDir, { recursive: true });
-  await writeFile(join(storeDir, fileName), bytes);
-  const imageUrl = `/products/${store.id}/${fileName}`;
-
+  const imageUrl = await saveProductImage(store.id, `${randomUUID()}.${ext}`, bytes);
   let previous: string | null | undefined;
   try {
     previous = await withStore(store.id, async (tx) => {
@@ -335,17 +371,15 @@ app.put("/v1/products/:id/image", async (c) => {
       return row.imageUrl;
     });
   } catch (e) {
-    await rm(join(storeDir, fileName), { force: true });
+    await removeProductImage(store.id, imageUrl);
     throw e;
   }
   if (previous === undefined) {
-    await rm(join(storeDir, fileName), { force: true });
+    await removeProductImage(store.id, imageUrl);
     return c.json({ error: "not_found" }, 404);
   }
   // Shared sample pictures sit outside the store's folder and are left alone.
-  if (previous?.startsWith(`/products/${store.id}/`)) {
-    await rm(join(storeDir, basename(previous)), { force: true });
-  }
+  if (previous) await removeProductImage(store.id, previous);
   return c.json({ imageUrl });
 });
 
@@ -389,16 +423,24 @@ app.post("/v1/sync/sales", async (c) => {
             branchId: c.get("device").branchId,
             vatInclusive: sale.vatInclusive,
             vatPoisha: sale.vatPoisha,
+            pointsRedeemed: sale.pointsRedeemed,
+            pointsPoisha: sale.pointsPoisha,
+            giftCardCode: sale.giftCardCode,
+            giftCardPoisha: sale.giftCardPoisha,
+            couponCode: sale.couponCode,
+            tableName: sale.tableName,
+            orderType: sale.orderType,
           })
           .onConflictDoNothing()
           .returning({ id: sales.id });
         if (inserted.length === 0) return; // Already received: a retry must not deduct stock twice.
 
         const costRows = await tx
-          .select({ id: products.id, costPoisha: products.costPoisha })
+          .select({ id: products.id, costPoisha: products.costPoisha, tracking: products.tracking })
           .from(products)
           .where(and(eq(products.storeId, store.id), inArray(products.id, sale.lines.map((l) => l.productId))));
         const costs = new Map(costRows.map((p) => [p.id, p.costPoisha]));
+        const tracking = new Map(costRows.map((p) => [p.id, p.tracking]));
         const bill = computeBill(sale.lines, sale.discountPoisha, sale.vatInclusive);
         await tx.insert(saleLines).values(
           sale.lines.map((l, i) => ({
@@ -416,24 +458,43 @@ app.post("/v1/sync/sales", async (c) => {
             vatRateBp: l.vatRateBp,
             vatPoisha: bill.lines[i].vatPoisha,
             finalPoisha: bill.lines[i].finalPoisha,
+            note: l.note,
           })),
         );
         // Stock may go negative: the sale really happened, so the shortfall is shown, not refused.
-        await tx.insert(stockLedger).values(
-          sale.lines.map((l) => ({
-            storeId: store.id,
-            branchId: c.get("device").branchId,
-            productId: l.productId,
-            qtyDelta: -Math.round((l.qty * l.packQty) / QTY_SCALE),
-            reason: "sale" as const,
-            refId: sale.id,
-            actorId: sale.cashierId,
-            occurredAt: new Date(sale.soldAt),
-          })),
-        );
+        const branchId = c.get("device").branchId;
+        const soldAt = new Date(sale.soldAt);
+        for (const l of sale.lines) {
+          const kind = tracking.get(l.productId) ?? "none";
+          const qty = Math.round((l.qty * l.packQty) / QTY_SCALE);
+          await takeStock(tx, { storeId: store.id, branchId, productId: l.productId, qty, reason: "sale", refId: sale.id, actorId: sale.cashierId, occurredAt: soldAt }, kind === "batch");
+          if (kind === "serial" && l.serials.length) await sellSerials(tx, store.id, l.productId, branchId, l.serials, sale.id, soldAt);
+        }
+        if (sale.giftCardPoisha > 0 && sale.giftCardCode) {
+          const [card] = await tx.select({ id: giftCards.id }).from(giftCards).where(and(eq(giftCards.storeId, store.id), eq(giftCards.code, sale.giftCardCode.toUpperCase())));
+          // Never lose a sale over a card: an unknown code is kept on the sale and flagged in the activity log.
+          if (card) await tx.insert(giftCardLedger).values({ storeId: store.id, giftCardId: card.id, amountPoisha: -sale.giftCardPoisha, saleId: sale.id });
+          else await audit(tx, store.id, sale.cashierId, "gift_card_unknown", sale.id, { code: sale.giftCardCode, amountPoisha: sale.giftCardPoisha });
+        }
+        if (sale.customerId) {
+          const settings = await getSettings(tx, store.id);
+          if (sale.pointsRedeemed > 0) {
+            await tx.insert(loyaltyLedger).values({ storeId: store.id, customerId: sale.customerId, points: -sale.pointsRedeemed, reason: "redeem", refId: sale.id, actorId: sale.cashierId });
+          }
+          if (hasFeature(settings, "loyalty")) {
+            // Points come from money actually paid now: not from points, gift cards or baki still owed.
+            const paid = sale.paymentMethod === "baki" ? sale.tenderedPoisha : dueByMethod(sale);
+            const earned = pointsEarned(paid, settings.loyaltyEarnPoisha);
+            if (earned > 0) await tx.insert(loyaltyLedger).values({ storeId: store.id, customerId: sale.customerId, points: earned, reason: "earn", refId: sale.id, actorId: sale.cashierId });
+          }
+        }
       });
       results.push({ id: sale.id, status: "accepted" });
     } catch (e) {
+      if (e instanceof ApiError) {
+        results.push({ id: sale.id, status: "rejected", reason: e.code });
+        continue;
+      }
       if (pgCode(e) !== FOREIGN_KEY_VIOLATION) throw e; // Anything else is temporary, so the POS retries.
       results.push({ id: sale.id, status: "rejected", reason: "unknown_reference" });
     }

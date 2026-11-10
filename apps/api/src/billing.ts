@@ -1,6 +1,7 @@
 import {
   billingPaymentSchema,
   manualSubscriptionSchema,
+  BUSINESS_PROFILES,
   DEFAULT_SETTINGS,
   storeSettingsSchema,
   type StoreSettings,
@@ -137,6 +138,9 @@ export function registerPublic(app: Hono<Env>) {
           await tx.insert(branches).values({ storeId, name: "Main" });
           await tx.insert(users).values({ storeId, name: input.ownerName, email: input.email, phone: input.phone, role: "owner", pinHash });
           await tx.insert(subscriptions).values({ storeId, plan: TRIAL_PLAN, trialEndsAt: new Date(Date.now() + TRIAL_DAYS * 86_400_000) });
+          if (input.businessType) {
+            await tx.insert(storeSettings).values({ storeId, businessType: input.businessType, features: BUSINESS_PROFILES[input.businessType].features, onboarded: false });
+          }
           await tx.delete(signupCodes).where(eq(signupCodes.contact, input.email));
         });
       } catch (e) {

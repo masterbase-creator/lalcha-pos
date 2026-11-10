@@ -7,7 +7,9 @@ import { z } from "zod";
 import { config } from "./config.ts";
 import { platformDb, type Env } from "./db.ts";
 import { ApiError, guarded, PAGE_SIZE, pageOf, parse } from "./http.ts";
+import { randomUUID } from "node:crypto";
 import { sendMail } from "./mail.ts";
+import { getObject, putObject } from "./storage.ts";
 import { platformAudit, platformMail } from "./schema.ts";
 import { safeEqual, sha256 } from "./secrets.ts";
 
@@ -40,7 +42,10 @@ const postalMessage = z.object({
   references: z.string().max(5000).nullable().optional(),
   plain_body: z.string().max(500_000).nullable().optional(),
   html_body: z.string().max(2_000_000).nullable().optional(),
-  attachments: z.array(z.object({ filename: z.string().max(500).nullable().optional(), size: z.number().optional() }).passthrough()).optional().default([]),
+  attachments: z
+    .array(z.object({ filename: z.string().max(500).nullable().optional(), size: z.number().optional(), content_type: z.string().max(200).nullable().optional(), data: z.string().optional() }).passthrough())
+    .optional()
+    .default([]),
 });
 
 const toSummary = (r: typeof platformMail.$inferSelect): PlatformMailSummary => ({
@@ -57,10 +62,25 @@ export function registerInbox(app: Hono<Env>) {
       if (!token || !safeEqual(sha256(c.req.query("k") ?? ""), sha256(token))) throw new ApiError("not_found", 404);
       const m = postalMessage.parse(await c.req.json());
       const from = splitAddress(m.from || m.mail_from);
-      const attachments = m.attachments.map((a) => ({ filename: a.filename ?? "attachment", size: a.size ?? 0 }));
+      const id = randomUUID();
+      // The files themselves go to storage; the message keeps their names, sizes and where they are.
+      const attachments: { filename: string; size: number; contentType: string; key?: string }[] = [];
+      for (const [n, a] of m.attachments.entries()) {
+        const filename = (a.filename ?? "attachment").replace(/[\\/\u0000-\u001f]/g, "_").slice(0, 200) || "attachment";
+        const contentType = a.content_type || "application/octet-stream";
+        const bytes = a.data ? Buffer.from(a.data, "base64") : null;
+        if (!bytes?.length) {
+          attachments.push({ filename, size: a.size ?? 0, contentType });
+          continue;
+        }
+        const key = `mail/${id}/${n}-${filename.replace(/[^\w.-]+/g, "_")}`;
+        await putObject(key, bytes, contentType);
+        attachments.push({ filename, size: bytes.length, contentType, key });
+      }
       await platformDb
         .insert(platformMail)
         .values({
+          id,
           direction: "in",
           mailbox: mailboxOf(m.rcpt_to),
           fromAddress: from.address || m.mail_from.toLowerCase(),
@@ -129,9 +149,33 @@ export function registerInbox(app: Hono<Env>) {
         .limit(50);
       const full = (r: typeof platformMail.$inferSelect): PlatformMail => ({
         ...toSummary(r), textBody: r.textBody, htmlBody: r.htmlBody, messageId: r.messageId, inReplyTo: r.inReplyTo,
-        attachments: r.attachments ? (JSON.parse(r.attachments) as { filename: string; size: number }[]) : [], sentBy: r.sentBy,
+        attachments: r.attachments ? (JSON.parse(r.attachments) as { filename: string; size: number; key?: string }[]).map((a) => ({ filename: a.filename, size: a.size, stored: Boolean(a.key) })) : [], sentBy: r.sentBy,
       });
       return c.json({ mail: full(row), thread: thread.map(full) });
+    }),
+  );
+
+  // Downloads go through the panel's session check; the storage bucket itself is private.
+  app.get(
+    "/v1/platform/mail/:id/attachments/:n",
+    guarded(async (c) => {
+      const id = z.string().uuid().safeParse(c.req.param("id"));
+      const n = z.coerce.number().int().min(0).max(200).safeParse(c.req.param("n"));
+      if (!id.success || !n.success) throw new ApiError("not_found", 404);
+      const [row] = await platformDb.select({ attachments: platformMail.attachments }).from(platformMail).where(eq(platformMail.id, id.data));
+      const file = row?.attachments ? (JSON.parse(row.attachments) as { filename: string; contentType?: string; key?: string }[])[n.data] : undefined;
+      if (!file?.key) throw new ApiError("not_found", 404);
+      const found = await getObject(file.key);
+      if (!found) throw new ApiError("not_found", 404);
+      // Always a download, never shown inline: an attached HTML file must not run on the admin site.
+      return new Response(found.body, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+          "x-content-type-options": "nosniff",
+          "cache-control": "private, no-store",
+        },
+      });
     }),
   );
 

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { and, eq } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { hashPin } from "./secrets.ts";
-import { branches, customerPayments, customers, productPacks, products, saleLines, sales, stockLedger, stores, subscriptions, suppliers, users } from "./schema.ts";
+import { branches, customerPayments, customers, productPacks, products, saleLines, sales, stockLedger, stores, subscriptions, suppliers, users, coupons, expenses, storeSettings } from "./schema.ts";
 
 /** Staff of the sample stores. The demo PINs are public: they are shown on the demo's sign-in screen. */
 export const DEMO_STAFF = {
@@ -132,6 +132,9 @@ export async function seedStore(db: Db, subdomain: "demo" | "other", name: strin
       storeId, id: stableUuid(`user:${subdomain}:${key}`), name: staffName, phone: opts.withPhones ? phone : null, email: opts.withPhones ? email : null, role, pinHash: await hashPin(pin),
     }).onConflictDoUpdate({ target: [users.storeId, users.id], set: { email: opts.withPhones ? email : null } });
   }
+  // Sample stores skip onboarding: a grocery with points and accounts switched on.
+  const shop = { businessType: "grocery" as const, features: ["loyalty", "accounting"] as ("loyalty" | "accounting")[], onboarded: true };
+  await db.insert(storeSettings).values({ storeId, ...shop }).onConflictDoUpdate({ target: storeSettings.storeId, set: shop });
   if (subdomain === "other") {
     // A second store with one item, so store isolation can be tested.
     await db.insert(products).values({
@@ -162,7 +165,15 @@ export async function seedStore(db: Db, subdomain: "demo" | "other", name: strin
     }).onConflictDoNothing();
   }
   await seedVariantsAndPacks(db, storeId, mainBranch, opts.imageDir);
+  await db.insert(coupons).values({ storeId, id: stableUuid("demo:coupon:eid"), code: "EID10", kind: "percent", value: 1000, minSpendPoisha: 50_000, maxDiscountPoisha: 20_000 }).onConflictDoNothing();
   if (!history) return storeId;
+  const owner = stableUuid(`user:${subdomain}:${DEMO_STAFF[subdomain][0][0]}`);
+  const day = (n: number) => new Date(Date.now() + 6 * 3_600_000 - n * DAY).toISOString().slice(0, 10);
+  await db.insert(expenses).values([
+    { storeId, id: stableUuid("demo:exp:rent"), branchId: mainBranch, category: "rent", amountPoisha: 1_500_000, method: "cash", spentOn: day(10), createdBy: owner },
+    { storeId, id: stableUuid("demo:exp:salary"), branchId: mainBranch, category: "salary", amountPoisha: 1_200_000, method: "bkash", ref: "DEMO8XK2", spentOn: day(5), createdBy: owner },
+    { storeId, id: stableUuid("demo:exp:bill"), branchId: mainBranch, category: "utilities", amountPoisha: 240_000, method: "cash", note: "বিদ্যুৎ বিল", spentOn: day(3), createdBy: owner },
+  ]).onConflictDoNothing();
 
   await db.insert(suppliers).values([
     { storeId, id: stableUuid("demo:supplier:1"), name: "Meghna Traders", phone: "01900000011", address: "Moulvibazar, Dhaka" },

@@ -93,7 +93,7 @@ function SaleReturn({
       let credit = 0;
       if (sale.paymentMethod === "baki" && sale.customerId) {
         const owed = customers.find((c) => c.id === sale.customerId)?.duePoisha ?? 0;
-        credit = Math.max(0, Math.min(value, sale.totalPoisha - sale.tenderedPoisha - sale.creditedPoisha, owed));
+        credit = Math.max(0, Math.min(value, sale.totalPoisha - (sale.pointsPoisha ?? 0) - (sale.giftCardPoisha ?? 0) - sale.tenderedPoisha - sale.creditedPoisha, owed));
       }
       await enqueueOp("sale_return", returnId.current, getAuth().user!.id, {
         saleId: sale.id, id: returnId.current, lines, refundMethod: method, refundRef: reference.trim() || null, creditPoisha: credit, valuePoisha: value,

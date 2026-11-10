@@ -22,14 +22,16 @@ import type { Hono } from "hono";
 import { managers, requireDevice, staffOnly } from "./auth.ts";
 import { audit, pgCode, withStore, type Env, type Tx } from "./db.ts";
 import { ApiError, guarded, idParam, PAGE_SIZE, pageOf, parse } from "./http.ts";
-import { customerPayments, customers, products, saleLines, saleReturnLines, saleReturns, sales, shifts, stockLedger, users } from "./schema.ts";
+import { batchOfSale, returnSerials } from "./stock.ts";
+import { customerPoints } from "./features.ts";
+import { customerPayments, customers, loyaltyLedger, products, saleLines, saleReturnLines, saleReturns, sales, shifts, stockLedger, users } from "./schema.ts";
 
 /** A customer's baki is always: unpaid sales, minus collections, minus returns credited to it. */
 export async function customerDues(tx: Tx, storeId: string, customerId?: string) {
   const only = customerId ? sql`and customer_id = ${customerId}` : sql``;
   const rows = (await tx.execute(sql`
     select id, sum(amount)::float8 as due from (
-      select customer_id as id, total_poisha - tendered_poisha as amount from sales
+      select customer_id as id, total_poisha - points_poisha - gift_card_poisha - tendered_poisha as amount from sales
         where store_id = ${storeId} and payment_method = 'baki' ${only}
       union all
       select customer_id, -amount_poisha from customer_payments where store_id = ${storeId} ${only}
@@ -93,7 +95,7 @@ export async function runSaleReturn(tx: Tx, storeId: string, actorId: string, sa
         if (sale.paymentMethod === "baki" && sale.customerId) {
           await tx.select({ id: customers.id }).from(customers).where(oneCustomer(storeId, sale.customerId)).for("update");
           const dues = await customerDues(tx, storeId, sale.customerId);
-          const unpaidOnSale = sale.totalPoisha - sale.tenderedPoisha - priorCredit;
+          const unpaidOnSale = sale.totalPoisha - sale.pointsPoisha - sale.giftCardPoisha - sale.tenderedPoisha - priorCredit;
           credit = Math.max(0, Math.min(value, unpaidOnSale, dues.get(sale.customerId) ?? 0));
           // A refund handed over during an outage stands as the till recorded it.
           if (decidedCredit !== null) credit = Math.min(value, decidedCredit);
@@ -125,10 +127,17 @@ export async function runSaleReturn(tx: Tx, storeId: string, actorId: string, sa
           })),
         );
         const restock = planned.filter((p) => p.request.restock);
-        if (restock.length) {
-          await tx.insert(stockLedger).values(
-            restock.map((p) => ({ storeId: storeId, branchId: sale.branchId, productId: p.line.productId, qtyDelta: Math.round((p.request.qty * p.line.packQty) / 1000), reason: "return" as const, refId: input.id, actorId: actorId })),
-          );
+        for (const p of restock) {
+          // Back into the batch it was sold from, so its expiry date stays right.
+          const batchId = await batchOfSale(tx, storeId, saleId, p.line.productId);
+          await tx.insert(stockLedger).values({ storeId, branchId: sale.branchId, productId: p.line.productId, qtyDelta: Math.round((p.request.qty * p.line.packQty) / 1000), reason: "return", refId: input.id, actorId, batchId });
+        }
+        for (const p of planned) await returnSerials(tx, storeId, p.line.productId, saleId, Math.round((p.request.qty * p.line.packQty) / 1000 / 1000), p.request.restock);
+        // Points earned on returned goods are taken back, in proportion to what came back.
+        if (sale.customerId) {
+          const [earned] = await tx.select({ points: sql<number>`coalesce(sum(${loyaltyLedger.points}), 0)::int` }).from(loyaltyLedger).where(and(eq(loyaltyLedger.storeId, storeId), eq(loyaltyLedger.refId, saleId), eq(loyaltyLedger.reason, "earn")));
+          const takeBack = sale.totalPoisha > 0 ? Math.floor((earned.points * value) / sale.totalPoisha) : 0;
+          if (takeBack > 0) await tx.insert(loyaltyLedger).values({ storeId, customerId: sale.customerId, points: -takeBack, reason: "return", refId: input.id, actorId });
         }
         await audit(tx, storeId, actorId, "sale_return", saleId, { valuePoisha: value, receiptNo: sale.receiptNo });
         return { valuePoisha: value, creditPoisha: credit, refundPoisha: refund };
@@ -164,7 +173,8 @@ export function registerCustomers(app: Hono<Env>) {
           .where(and(eq(customers.storeId, store.id), isNull(customers.archivedAt)))
           .orderBy(customers.name);
         const dues = await customerDues(tx, store.id);
-        return rows.map((r): CustomerSummary => ({ ...r, duePoisha: dues.get(r.id) ?? 0 }));
+        const points = await customerPoints(tx, store.id);
+        return rows.map((r): CustomerSummary => ({ ...r, duePoisha: dues.get(r.id) ?? 0, points: points.get(r.id) ?? 0 }));
       });
       return c.json({ customers: list });
     }),
@@ -347,6 +357,7 @@ export function registerCustomers(app: Hono<Env>) {
           .select({
             id: sales.id, receiptNo: sales.receiptNo, soldAt: sales.soldAt, totalPoisha: sales.totalPoisha, tenderedPoisha: sales.tenderedPoisha, discountPoisha: sales.discountPoisha,
             vatPoisha: sales.vatPoisha, paymentMethod: sales.paymentMethod, bakiPaidMethod: sales.bakiPaidMethod, customerId: sales.customerId, cashierName: users.name,
+            pointsPoisha: sales.pointsPoisha, giftCardPoisha: sales.giftCardPoisha,
           })
           .from(sales)
           .leftJoin(users, and(eq(users.storeId, sales.storeId), eq(users.id, sales.cashierId)))
@@ -356,7 +367,7 @@ export function registerCustomers(app: Hono<Env>) {
         if (!rows.length) return [];
         const ids = rows.map((r) => r.id);
         const lines = await tx
-          .select({ saleId: saleLines.saleId, lineNo: saleLines.lineNo, productId: saleLines.productId, name: saleLines.name, qty: saleLines.qty, unitPricePoisha: saleLines.unitPricePoisha, finalPoisha: saleLines.finalPoisha, unit: lineUnit })
+          .select({ saleId: saleLines.saleId, lineNo: saleLines.lineNo, productId: saleLines.productId, name: saleLines.name, qty: saleLines.qty, unitPricePoisha: saleLines.unitPricePoisha, finalPoisha: saleLines.finalPoisha, unit: lineUnit, note: saleLines.note })
           .from(saleLines)
           .innerJoin(products, and(eq(products.storeId, saleLines.storeId), eq(products.id, saleLines.productId)))
           .where(and(eq(saleLines.storeId, store.id), inArray(saleLines.saleId, ids)))

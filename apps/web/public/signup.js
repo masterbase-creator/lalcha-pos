@@ -52,6 +52,8 @@ form.addEventListener("submit", async (event) => {
       email,
       phone,
       pin: $("pin").value,
+      // Set by the shop-type pages ("Start free" on /for/pharmacy/), so onboarding starts on that type.
+      businessType: ["grocery", "general_store", "pharmacy", "restaurant", "tea_stall", "hardware", "furniture", "electronics", "auto_parts", "fashion", "jewellery", "cosmetics", "optical", "stationery", "bakery", "agro", "wholesale", "general"].find((t) => t === new URLSearchParams(location.search).get("type")) ?? null,
       code: $("code").value,
     });
     if (!ok) return void (error.textContent = message(data.error ?? "save_failed"));

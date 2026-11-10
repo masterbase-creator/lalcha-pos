@@ -18,9 +18,10 @@ import { randomUUID } from "node:crypto";
 import { managers } from "./auth.ts";
 import { audit, withStore, type Env, type Tx } from "./db.ts";
 import { ApiError, guarded, idParam, PAGE_SIZE, pageOf, parse } from "./http.ts";
-import { products, purchaseLines, purchaseReceipts, purchaseReturnLines, purchaseReturns, purchases, stockLedger, supplierPayments, suppliers } from "./schema.ts";
+import { ensureBatch, receiveSerials, takeStock } from "./stock.ts";
+import { productSerials, products, purchaseLines, purchaseReceipts, purchaseReturnLines, purchaseReturns, purchases, stockLedger, supplierPayments, suppliers } from "./schema.ts";
 
-type Line = { productId: string; qty: number; unitCostPoisha: number };
+type Line = { productId: string; qty: number; unitCostPoisha: number; batchNo?: string | null; expiresOn?: string | null; serials?: string[] };
 
 const totalsOf = (lines: Line[], discountPoisha: number) =>
   computeTotals(lines.map((l) => ({ qty: l.qty, unitPricePoisha: l.unitCostPoisha })), discountPoisha);
@@ -43,7 +44,7 @@ async function receiveIntoStock(tx: Tx, storeId: string, purchase: { id: string;
     const { qty, value } = grouped.get(productId)!;
     worth += value;
     const where = and(eq(products.storeId, storeId), eq(products.id, productId), isNull(products.archivedAt));
-    const [product] = await tx.select({ costPoisha: products.costPoisha }).from(products).where(where).for("update");
+    const [product] = await tx.select({ costPoisha: products.costPoisha, tracking: products.tracking }).from(products).where(where).for("update");
     if (!product) throw new ApiError("unknown_product");
     // Average cost is store-wide, so it counts stock across every branch.
     const stock = await stockOf(tx, storeId, productId);
@@ -52,7 +53,12 @@ async function receiveIntoStock(tx: Tx, storeId: string, purchase: { id: string;
     const units = held + BigInt(qty);
     const averageCost = (held * BigInt(product.costPoisha) + value * BigInt(QTY_SCALE) + units / 2n) / units;
     await tx.update(products).set({ costPoisha: Number(averageCost) }).where(where);
-    await tx.insert(stockLedger).values({ storeId, branchId: purchase.branchId, productId, qtyDelta: qty, reason: "purchase", refId: purchase.id, actorId });
+    // Each line goes into its own batch, so two batches of one medicine on one bill stay apart.
+    for (const l of receiving.filter((r) => r.productId === productId)) {
+      const batchId = product.tracking === "batch" && l.batchNo ? await ensureBatch(tx, storeId, productId, purchase.branchId, l.batchNo, l.expiresOn ?? null) : null;
+      if (product.tracking === "serial" && l.serials?.length) await receiveSerials(tx, storeId, productId, purchase.branchId, l.serials, purchase.id);
+      await tx.insert(stockLedger).values({ storeId, branchId: purchase.branchId, productId, qtyDelta: l.qty, reason: "purchase", refId: purchase.id, actorId, batchId });
+    }
   }
   return Number(worth);
 }
@@ -306,6 +312,7 @@ export function registerPurchases(app: Hono<Env>) {
             nameBn: products.nameBn,
             imageUrl: products.imageUrl,
             unit: products.unit,
+            tracking: products.tracking,
             qty: purchaseLines.qty,
             receivedQty: purchaseLines.receivedQty,
             unitCostPoisha: purchaseLines.unitCostPoisha,
@@ -355,7 +362,7 @@ export function registerPurchases(app: Hono<Env>) {
           .onConflictDoNothing({ target: [purchases.storeId, purchases.id] })
           .returning({ id: purchases.id });
         if (!inserted.length) return; // Already saved: a retry must not add the stock again.
-        await tx.insert(purchaseLines).values(input.lines.map((l, i) => ({ storeId: store.id, purchaseId: input.id, lineNo: i + 1, ...l, receivedQty: input.receiveNow ? l.qty : 0 })));
+        await tx.insert(purchaseLines).values(input.lines.map((l, i) => ({ storeId: store.id, purchaseId: input.id, lineNo: i + 1, productId: l.productId, qty: l.qty, unitCostPoisha: l.unitCostPoisha, receivedQty: input.receiveNow ? l.qty : 0 })));
         await audit(tx, store.id, actor.id, "purchase_create", input.id, { totalPoisha, received: input.receiveNow });
         if (input.receiveNow) await receiveIntoStock(tx, store.id, { id: input.id, branchId, subtotalPoisha, totalPoisha }, input.lines, actor.id);
         // Money paid before delivery becomes an advance on the supplier's account.
@@ -392,13 +399,13 @@ export function registerPurchases(app: Hono<Env>) {
         if (!p) throw new ApiError("not_found", 404);
         if (p.status !== "ordered" && p.status !== "partial") throw new ApiError("not_open", 409);
         const lines = await tx.select().from(purchaseLines).where(and(eq(purchaseLines.storeId, store.id), eq(purchaseLines.purchaseId, id)));
-        const requested = input.lines ?? lines.filter((l) => l.qty > l.receivedQty).map((l) => ({ lineNo: l.lineNo, qty: l.qty - l.receivedQty }));
+        const requested = input.lines ?? lines.filter((l) => l.qty > l.receivedQty).map((l) => ({ lineNo: l.lineNo, qty: l.qty - l.receivedQty, batchNo: null, expiresOn: null, serials: [] as string[] }));
         if (requested.length === 0) throw new ApiError("no_lines");
         const receiving: Line[] = requested.map((r) => {
           const line = lines.find((l) => l.lineNo === r.lineNo);
           if (!line) throw new ApiError("unknown_reference");
           if (r.qty > line.qty - line.receivedQty) throw new ApiError("exceeds_order");
-          return { productId: line.productId, qty: r.qty, unitCostPoisha: line.unitCostPoisha };
+          return { productId: line.productId, qty: r.qty, unitCostPoisha: line.unitCostPoisha, batchNo: r.batchNo, expiresOn: r.expiresOn, serials: r.serials };
         });
         const { subtotalPoisha } = totalsOf(lines, p.discountPoisha);
         let worth = await receiveIntoStock(tx, store.id, { id, branchId: p.branchId, subtotalPoisha, totalPoisha: p.totalPoisha }, receiving, actor.id);
@@ -475,10 +482,10 @@ export function registerPurchases(app: Hono<Env>) {
           const line = lines.find((l) => l.lineNo === request.lineNo);
           if (!line) throw new ApiError("unknown_reference");
           if (request.qty > line.receivedQty - (back.get(line.lineNo) ?? 0)) throw new ApiError("exceeds_sold");
-          await tx.select({ id: products.id }).from(products).where(and(eq(products.storeId, store.id), eq(products.id, line.productId))).for("update");
+          const [product] = await tx.select({ id: products.id, tracking: products.tracking }).from(products).where(and(eq(products.storeId, store.id), eq(products.id, line.productId))).for("update");
           if ((await stockOf(tx, store.id, line.productId, p.branchId)) < request.qty) throw new ApiError("insufficient_stock");
           value += subtotal === 0 ? 0 : Math.floor((lineAmount(request.qty, line.unitCostPoisha) * p.totalPoisha) / subtotal);
-          await tx.insert(stockLedger).values({ storeId: store.id, branchId: p.branchId, productId: line.productId, qtyDelta: -request.qty, reason: "purchase_return", refId: input.id, actorId: actor.id });
+          await takeStock(tx, { storeId: store.id, branchId: p.branchId, productId: line.productId, qty: request.qty, reason: "purchase_return", refId: input.id, actorId: actor.id }, product?.tracking === "batch");
         }
         await tx.select({ id: suppliers.id }).from(suppliers).where(and(eq(suppliers.storeId, store.id), eq(suppliers.id, p.supplierId))).for("update");
         const dues = await supplierDues(tx, store.id, p.supplierId);
@@ -520,7 +527,15 @@ export function registerPurchases(app: Hono<Env>) {
             const cost = (BigInt(Math.round(stock)) * BigInt(product.costPoisha) - value + left / 2n) / left;
             await tx.update(products).set({ costPoisha: Number(cost < 0n ? 0n : cost) }).where(where);
           }
-          await tx.insert(stockLedger).values({ storeId: store.id, branchId: p.branchId, productId: line.productId, qtyDelta: -line.receivedQty, reason: "purchase_void", refId: id, actorId: actor.id });
+          // Reverses exactly what this purchase put in, batch by batch.
+          const added = await tx
+            .select({ qty: stockLedger.qtyDelta, batchId: stockLedger.batchId })
+            .from(stockLedger)
+            .where(and(eq(stockLedger.storeId, store.id), eq(stockLedger.refId, id), eq(stockLedger.productId, line.productId), eq(stockLedger.reason, "purchase")));
+          await tx.insert(stockLedger).values(
+            (added.length ? added : [{ qty: line.receivedQty, batchId: null }]).map((a) => ({ storeId: store.id, branchId: p.branchId, productId: line.productId, qtyDelta: -a.qty, reason: "purchase_void" as const, refId: id, actorId: actor.id, batchId: a.batchId })),
+          );
+          await tx.update(productSerials).set({ status: "returned" }).where(and(eq(productSerials.storeId, store.id), eq(productSerials.purchaseId, id), eq(productSerials.status, "in_stock")));
         }
         await tx.update(purchases).set({ status: "voided" }).where(and(eq(purchases.storeId, store.id), eq(purchases.id, id)));
         await audit(tx, store.id, actor.id, "purchase_void", id, { totalPoisha: p.totalPoisha });

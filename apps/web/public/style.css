@@ -72,3 +72,20 @@ footer nav { display:flex; gap:16px; flex-wrap:wrap; }
 .contact-ways span { display:block; color:var(--muted); font-size:15px; font-weight:700; }
 .contact-ways a { font-weight:900; font-size:20px; color:var(--ink); overflow-wrap:anywhere; }
 @media (max-width:860px) { .contact { grid-template-columns:1fr; gap:28px; padding-block:36px 56px; } .contact h1 { font-size:34px; } }
+/* Shop-type pages */
+.grid.shops { grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); }
+a.card.shop { display:block; color:var(--ink); text-decoration:none; transition:transform .08s; }
+a.card.shop:hover { transform:translate(-2px,-2px); box-shadow:5px 5px 0 var(--ink); }
+a.card.shop h2, a.card.shop h3 { margin:6px 0; font-size:21px; }
+a.card.shop p { color:var(--muted); font-size:16px; margin:0; }
+.shop-icon { font-size:34px; line-height:1; }
+.shop-icon.big { font-size:56px; margin:0 0 8px; }
+.lead.answer { color:var(--ink); }
+.crumbs { padding-top:18px; font-size:15px; color:var(--muted); }
+.crumbs a { color:var(--muted); }
+ol.steps { counter-reset:step; list-style:none; padding:0; margin:0 0 24px; display:grid; gap:12px; }
+ol.steps li { counter-increment:step; background:var(--panel); border:3px solid var(--line); padding:14px 16px 14px 64px; position:relative; font-weight:700; }
+ol.steps li::before { content:counter(step); position:absolute; left:14px; top:50%; transform:translateY(-50%); width:36px; height:36px; display:grid; place-items:center; background:var(--accent); border:3px solid var(--line); font-weight:900; }
+.chips { display:flex; flex-wrap:wrap; gap:8px; }
+.chips a { border:2px solid var(--line); background:var(--panel); padding:8px 12px; color:var(--ink); text-decoration:none; font-weight:700; }
+footer nav { flex-wrap:wrap; }

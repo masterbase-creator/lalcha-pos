@@ -92,6 +92,13 @@
       "when": 1794298826060,
       "tag": "0012_hard_vulcan",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1794306037482,
+      "tag": "0013_bitter_loa",
+      "breakpoints": true
     }
   ]
 }

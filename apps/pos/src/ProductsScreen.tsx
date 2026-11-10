@@ -1,4 +1,4 @@
-import { CATEGORIES, formatQty, formatTaka, QTY_SCALE, UNIT_NAMES, UNITS, unitLabel, type CatalogProduct, type Pack, type Unit, type Lang, type ProductDetails } from "@lalcha/domain";
+import { categoriesFor, categoryLabel, formatQty, formatTaka, hasFeature, QTY_SCALE, UNIT_NAMES, UNITS, unitLabel, type CatalogProduct, type Modifier, type Pack, type StoreSettings, type Tracking, type Unit, type Lang, type ProductDetails } from "@lalcha/domain";
 import { v7 as uuidv7 } from "uuid";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StringKey } from "./i18n";
@@ -13,12 +13,14 @@ type Editing = { product: CatalogProduct | null; variantOf?: CatalogProduct };
 
 export function ProductsScreen({
   products,
+  settings,
   lang,
   t,
   online,
   onChanged,
 }: {
   products: CatalogProduct[];
+  settings: StoreSettings;
   lang: Lang;
   t: T;
   online: boolean;
@@ -30,7 +32,7 @@ export function ProductsScreen({
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return products.filter((p) => !q || [p.nameEn, p.nameBn, p.sku, p.barcode ?? ""].some((v) => v.toLowerCase().includes(q)));
+    return products.filter((p) => !q || [p.nameEn, p.nameBn, p.sku, p.barcode ?? "", p.genericName ?? ""].some((v) => v.toLowerCase().includes(q)));
   }, [products, query]);
 
   return (
@@ -89,6 +91,7 @@ export function ProductsScreen({
           variantOf={editing.variantOf ?? null}
           mains={products.filter((p) => !p.variantOf)}
           onAddVariant={(main) => setEditing({ product: null, variantOf: main })}
+          settings={settings}
           lang={lang}
           t={t}
           onClose={() => setEditing(null)}
@@ -104,12 +107,14 @@ const toPoisha = (text: string) => (text.trim() === "" ? NaN : Math.round(Number
 const fieldClass = "mt-1 h-12 w-full border-[3px] border-line bg-bg px-3 text-lg font-bold";
 
 type PackRow = { id: string; name: string; qty: string; price: string; barcode: string };
+type ModifierRow = { id: string; name: string; price: string };
 
 function ProductForm({
   product,
   variantOf: startAsVariantOf,
   mains,
   onAddVariant,
+  settings,
   lang,
   t,
   onClose,
@@ -120,6 +125,7 @@ function ProductForm({
   /** Products that can have variants: the ones that aren't variants themselves. */
   mains: CatalogProduct[];
   onAddVariant: (main: CatalogProduct) => void;
+  settings: StoreSettings;
   lang: Lang;
   t: T;
   onClose: () => void;
@@ -131,7 +137,15 @@ function ProductForm({
   const plain = (p: CatalogProduct | null | undefined, k: "nameEn" | "nameBn") => (p ? ((p as { plainEn?: string; plainBn?: string })[k === "nameEn" ? "plainEn" : "plainBn"] ?? p[k]) : "");
   const [nameBn, setNameBn] = useState(plain(base, "nameBn"));
   const [nameEn, setNameEn] = useState(plain(base, "nameEn"));
-  const [category, setCategory] = useState<string>(base?.category ?? CATEGORIES[0]);
+  const categories = categoriesFor(settings.businessType);
+  const [category, setCategory] = useState<string>(base?.category ?? categories[0]);
+  const [tracking, setTracking] = useState<Tracking>(base?.tracking ?? (hasFeature(settings, "batches") ? "batch" : hasFeature(settings, "serials") ? "serial" : "none"));
+  const [warranty, setWarranty] = useState(base?.warrantyMonths != null ? String(base.warrantyMonths) : "");
+  const [genericName, setGenericName] = useState(base?.genericName ?? "");
+  const [modifiers, setModifiers] = useState<ModifierRow[]>((base?.modifiers ?? []).map((m) => ({ id: m.id, name: m.name, price: m.pricePoisha ? String(m.pricePoisha / 100) : "" })));
+  const [batchNo, setBatchNo] = useState("");
+  const [expiresOn, setExpiresOn] = useState("");
+  const [serialText, setSerialText] = useState("");
   // A new product must have its unit chosen on purpose: kg, feet and pieces are sold very differently.
   const [unit, setUnit] = useState<Unit | "">(base?.unit ?? "");
   const [vat, setVat] = useState(base?.vatRateBp != null ? String(base.vatRateBp / 100) : "");
@@ -163,6 +177,10 @@ function ProductForm({
         setVariantOf(details.variantOf ?? "");
         setVariantName(details.variantName ?? "");
         setPacks((details.packs ?? []).map((p) => ({ id: p.id, name: p.name, qty: String(p.qty / QTY_SCALE), price: taka(p.pricePoisha), barcode: p.barcode ?? "" })));
+        setTracking(details.tracking ?? "none");
+        setWarranty(details.warrantyMonths != null ? String(details.warrantyMonths) : "");
+        setGenericName(details.genericName ?? "");
+        setModifiers((details.modifiers ?? []).map((m) => ({ id: m.id, name: m.name, price: m.pricePoisha ? String(m.pricePoisha / 100) : "" })));
         setLoaded(true);
       } catch {
         if (!cancelled) setError(t("saveFailed"));
@@ -201,7 +219,7 @@ function ProductForm({
   async function errorMessage(res: Response) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     const code = body?.error as StringKey | undefined;
-    return code && ["name_required", "duplicate_barcode", "duplicate_sku", "invalid_image", "image_too_large", "unit_required", "variant_name_required", "pack_name_required", "has_variants"].includes(code)
+    return code && ["name_required", "duplicate_barcode", "duplicate_sku", "invalid_image", "image_too_large", "unit_required", "variant_name_required", "pack_name_required", "has_variants", "modifier_name_required"].includes(code)
       ? t(code)
       : t("saveFailed");
   }
@@ -230,12 +248,28 @@ function ProductForm({
       setError(t("packIncomplete"));
       return;
     }
+    const modifierList: Modifier[] = modifiers.filter((m) => m.name.trim() || m.price.trim()).map((m) => ({ id: m.id, name: m.name.trim(), pricePoisha: m.price.trim() ? toPoisha(m.price) : 0 }));
+    if (modifierList.some((m) => !m.name || !Number.isFinite(m.pricePoisha) || m.pricePoisha < 0)) {
+      setError(t("modifier_name_required"));
+      return;
+    }
+    const serials = serialText.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+    const isNew = !savedId;
+    if (isNew && tracking === "serial" && serials.length && stockNumber && serials.length * QTY_SCALE !== stockNumber) {
+      setError(t("serialCountMismatch"));
+      return;
+    }
+    if (isNew && tracking === "batch" && stockNumber > 0 && !batchNo.trim()) {
+      setError(t("batchRequired"));
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       const fields = {
         nameBn, nameEn, category, pricePoisha, costPoisha, barcode: barcode.trim() || null, unit, vatRateBp: vat.trim() === "" ? null : Math.round(Number(vat) * 100),
         variantOf: variantOf || null, variantName: variantName.trim() || null, packs: packList,
+        tracking, warrantyMonths: warranty.trim() ? Math.min(120, Math.round(Number(warranty))) : null, genericName: genericName.trim() || null, modifiers: modifierList,
       };
       let id = savedId;
       const res = id
@@ -247,7 +281,12 @@ function ProductForm({
         : await apiFetch("/v1/products", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ ...fields, openingStock: stockNumber }),
+            body: JSON.stringify({
+              ...fields,
+              openingStock: tracking === "serial" && serials.length ? serials.length * QTY_SCALE : stockNumber,
+              openingBatch: tracking === "batch" && batchNo.trim() ? { batchNo: batchNo.trim(), expiresOn: expiresOn || null } : null,
+              openingSerials: tracking === "serial" ? serials : [],
+            }),
           });
       if (!res.ok) {
         setError(await errorMessage(res));
@@ -353,8 +392,8 @@ function ProductForm({
           <label className="block font-bold">
             {t("category")}
             <select value={category} onChange={(e) => setCategory(e.target.value)} className={fieldClass}>
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>{t(c)}</option>
+              {[...new Set([...categories, category])].map((c) => (
+                <option key={c} value={c}>{categoryLabel(c, lang)}</option>
               ))}
             </select>
           </label>
@@ -410,6 +449,44 @@ function ProductForm({
           )}
         </fieldset>
 
+        {(hasFeature(settings, "batches") || hasFeature(settings, "serials") || tracking !== "none" || settings.businessType === "pharmacy") && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block font-bold">
+              {t("tracking")}
+              <select value={tracking} onChange={(e) => setTracking(e.target.value as Tracking)} className={fieldClass}>
+                <option value="none">{t("trackNone")}</option>
+                <option value="batch">{t("trackBatch")}</option>
+                <option value="serial">{t("trackSerial")}</option>
+              </select>
+            </label>
+            {tracking === "serial" ? (
+              <label className="block font-bold">{t("warrantyMonths")}<input inputMode="numeric" value={warranty} onChange={(e) => setWarranty(e.target.value.replace(/\D/g, ""))} placeholder="12" className={fieldClass} /></label>
+            ) : (
+              <label className="block font-bold">{t("genericName")}<input maxLength={120} value={genericName} onChange={(e) => setGenericName(e.target.value)} placeholder={t("genericPlaceholder")} className={fieldClass} /></label>
+            )}
+          </div>
+        )}
+
+        {hasFeature(settings, "restaurant") && (
+          <fieldset className="space-y-2 border-[3px] border-line p-3">
+            <legend className="px-1 text-lg font-black">{t("modifiers")}</legend>
+            <p className="text-sm font-bold text-muted">{t("modifiersHelp")}</p>
+            {modifiers.map((m, i) => {
+              const set = (patch: Partial<ModifierRow>) => setModifiers((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+              return (
+                <div key={m.id} className="grid grid-cols-[1.5fr_1fr_auto] gap-2">
+                  <label className="block text-sm font-bold">{t("modifierName")}<input maxLength={40} value={m.name} onChange={(e) => set({ name: e.target.value })} placeholder={t("modifierPlaceholder")} className={fieldClass} /></label>
+                  <label className="block text-sm font-bold">{t("extraPrice")}<input inputMode="decimal" value={m.price} onChange={(e) => set({ price: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="0" className={fieldClass} /></label>
+                  <button type="button" aria-label={t("remove")} className="mt-6 min-h-12 border-[3px] border-line px-3 font-black" onClick={() => setModifiers((list) => list.filter((_, j) => j !== i))}>✕</button>
+                </div>
+              );
+            })}
+            {modifiers.length < 20 && (
+              <button type="button" className="min-h-11 w-full border-[3px] border-dashed border-line font-black" onClick={() => setModifiers((list) => [...list, { id: uuidv7(), name: "", price: "" }])}>+ {t("addModifier")}</button>
+            )}
+          </fieldset>
+        )}
+
         <fieldset className="space-y-2 border-[3px] border-line p-3">
           <legend className="px-1 text-lg font-black">{t("packs")}</legend>
           <p className="text-sm font-bold text-muted">{t("packsHelp")}</p>
@@ -432,10 +509,24 @@ function ProductForm({
           )}
         </fieldset>
 
-        <label className="block font-bold">
-          {savedId ? `${t("adjustStock")} · ${t("currentStock")}: ${formatQty(product?.stock ?? 0, unit || "pc", lang)}` : t("openingStock")}{unitShort ? ` (${unitShort})` : ""}
-          <input inputMode="decimal" value={stock} onChange={(e) => setStock(e.target.value.replace(/[^0-9.-]/g, ""))} placeholder="0" className={fieldClass} />
-        </label>
+        {!savedId && tracking === "serial" ? (
+          <label className="block font-bold">
+            {t("openingStock")}: {t("serialNumbers")}
+            <span className="block text-sm text-muted">{t("serialsHelp")}</span>
+            <textarea rows={4} value={serialText} onChange={(e) => setSerialText(e.target.value)} className="mt-1 w-full border-[3px] border-line bg-bg px-3 py-2 font-mono font-bold" />
+          </label>
+        ) : (
+          <label className="block font-bold">
+            {savedId ? `${t("adjustStock")} · ${t("currentStock")}: ${formatQty(product?.stock ?? 0, unit || "pc", lang)}` : t("openingStock")}{unitShort ? ` (${unitShort})` : ""}
+            <input inputMode="decimal" value={stock} onChange={(e) => setStock(e.target.value.replace(/[^0-9.-]/g, ""))} placeholder="0" className={fieldClass} />
+          </label>
+        )}
+        {!savedId && tracking === "batch" && (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block font-bold">{t("batchNo")}<input maxLength={60} value={batchNo} onChange={(e) => setBatchNo(e.target.value)} className={fieldClass} /></label>
+            <label className="block font-bold">{t("expiryDate")}<input type="date" value={expiresOn} onChange={(e) => setExpiresOn(e.target.value)} className={fieldClass} /></label>
+          </div>
+        )}
 
         {error && <p role="alert" className="font-bold text-hot">{error}</p>}
 

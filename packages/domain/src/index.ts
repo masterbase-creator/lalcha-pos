@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { BUSINESS_TYPES, CATEGORIES, FEATURES } from "./business.ts";
+
+export * from "./business.ts";
 
 /** Shared business rules, used by both the POS and the API. Money is always whole poisha. */
 
@@ -13,9 +16,9 @@ const poisha = z.number().int().nonnegative().max(100_000_000_000);
 /** Quantities are whole thousandths, so 1 piece is 1000 and 1.25 kg is 1250. */
 export const QTY_SCALE = 1000;
 /** How a product is counted. Measured units can be sold in fractions (1.25 kg); counted ones only whole. */
-export const UNITS = ["pc", "kg", "gram", "litre", "ml", "metre", "feet", "yard", "sqft", "dozen", "hali", "box", "pack", "bag"] as const;
+export const UNITS = ["pc", "kg", "gram", "litre", "ml", "metre", "feet", "yard", "sqft", "dozen", "hali", "box", "pack", "bag", "vori"] as const;
 export type Unit = (typeof UNITS)[number];
-export const MEASURED_UNITS: readonly Unit[] = ["kg", "gram", "litre", "ml", "metre", "feet", "yard", "sqft"];
+export const MEASURED_UNITS: readonly Unit[] = ["kg", "gram", "litre", "ml", "metre", "feet", "yard", "sqft", "vori"];
 export const isLoose = (unit: Unit) => MEASURED_UNITS.includes(unit);
 const MAX_QTY = 100_000_000;
 export const lineAmount = (qty: number, unitPricePoisha: number) => Math.round((qty * unitPricePoisha) / QTY_SCALE);
@@ -33,8 +36,17 @@ export const saleLineSchema = z.object({
   /** For a pack (a dozen, a sack): how much of the product's own unit one sold pack uses, in thousandths. */
   packQty: z.number().int().positive().max(MAX_QTY).default(QTY_SCALE),
   packName: z.string().trim().max(40).nullable().default(null),
+  /** Extras chosen at the till ("extra cheese, less sugar") and any kitchen note. Their price is already in unitPricePoisha. */
+  note: z.string().trim().max(300).nullable().default(null),
+  /** For serial-tracked goods: one IMEI or serial per piece sold. */
+  serials: z.array(z.string().trim().min(1).max(64)).max(500).default([]),
 });
 export type SaleLine = z.infer<typeof saleLineSchema>;
+
+/** Money settled without cash or a wallet: loyalty points and gift cards. What's left is paid by the chosen method. */
+export const rewardsPaid = (s: { pointsPoisha?: number; giftCardPoisha?: number }) => (s.pointsPoisha ?? 0) + (s.giftCardPoisha ?? 0);
+/** What the chosen payment method has to cover. */
+export const dueByMethod = (s: { totalPoisha: number; pointsPoisha?: number; giftCardPoisha?: number }) => s.totalPoisha - rewardsPaid(s);
 
 /**
  * The full bill: spreads the discount across lines, then applies each line's own VAT rate.
@@ -100,8 +112,20 @@ export const saleSchema = z
     bakiPaidMethod: z.enum(["cash", "bkash", "nagad"]).default("cash"),
     vatInclusive: z.boolean().default(true),
     vatPoisha: poisha.default(0),
+    /** Any sale can name a customer, so they earn points. Baki needs one. */
+    pointsRedeemed: z.number().int().nonnegative().max(100_000_000).default(0),
+    pointsPoisha: poisha.default(0),
+    giftCardCode: z.string().trim().min(4).max(32).nullable().default(null),
+    giftCardPoisha: poisha.default(0),
+    couponCode: z.string().trim().min(1).max(32).nullable().default(null),
+    tableName: z.string().trim().max(40).nullable().default(null),
+    orderType: z.enum(["dine_in", "takeaway", "delivery"]).nullable().default(null),
   })
   .superRefine((sale, ctx) => {
+    const due = dueByMethod(sale);
+    if (due < 0) ctx.addIssue({ code: "custom", path: ["pointsPoisha"], message: "rewards_exceed_total" });
+    if (sale.giftCardPoisha > 0 && !sale.giftCardCode) ctx.addIssue({ code: "custom", path: ["giftCardCode"], message: "gift_card_required" });
+    if ((sale.pointsRedeemed > 0 || sale.pointsPoisha > 0) && !sale.customerId) ctx.addIssue({ code: "custom", path: ["customerId"], message: "customer_required" });
     const totals = computeBill(sale.lines, sale.discountPoisha, sale.vatInclusive);
     if (sale.vatPoisha !== totals.vatPoisha) {
       ctx.addIssue({ code: "custom", path: ["vatPoisha"], message: "vat_mismatch" });
@@ -114,8 +138,8 @@ export const saleSchema = z
     }
     if (sale.paymentMethod === "baki") {
       if (!sale.customerId) ctx.addIssue({ code: "custom", path: ["customerId"], message: "customer_required" });
-      if (sale.tenderedPoisha > sale.totalPoisha) ctx.addIssue({ code: "custom", path: ["tenderedPoisha"], message: "paid_exceeds_total" });
-    } else if (sale.tenderedPoisha < sale.totalPoisha) {
+      if (sale.tenderedPoisha > due) ctx.addIssue({ code: "custom", path: ["tenderedPoisha"], message: "paid_exceeds_total" });
+    } else if (sale.tenderedPoisha < due) {
       ctx.addIssue({ code: "custom", path: ["tenderedPoisha"], message: "underpaid" });
     }
     if (requiresPaymentRef(sale.paymentMethod) && !sale.paymentRef) {
@@ -164,7 +188,17 @@ export type StaffRecord = StaffMember & { email: string | null; phone: string | 
 export type DeviceRecord = { id: string; name: string; lastSeenAt: string; branchId: string };
 export type SignInResponse = { token: string; expiresAt: string; user: StaffMember };
 
-export const CATEGORIES = ["staples", "oil_spice", "drinks", "snacks", "fresh", "home_care"] as const;
+/** How a product's stock is followed: as a plain count, by batch and expiry date, or one serial number per piece. */
+export const TRACKING = ["none", "batch", "serial"] as const;
+export type Tracking = (typeof TRACKING)[number];
+
+/** An extra a customer can add at the till, such as "Extra cheese +৳30" or "Less sugar". */
+export const modifierSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1, "modifier_name_required").max(40),
+  pricePoisha: z.number().int().min(0).max(100_000_000),
+});
+export type Modifier = z.infer<typeof modifierSchema>;
 
 /** Another way to sell the same stock, e.g. "Dozen" = 12 pc, or "Sack" = 50 kg, at its own price. */
 export const packSchema = z.object({
@@ -189,6 +223,15 @@ const productFields = z.object({
   variantOf: z.string().uuid().nullable().default(null),
   variantName: z.string().trim().max(60).nullable().default(null),
   packs: z.array(packSchema).max(10).default([]),
+  tracking: z.enum(TRACKING).default("none"),
+  /** Shown on the receipt and used for warranty lookups of serial-tracked goods. */
+  warrantyMonths: z.number().int().min(0).max(120).nullable().default(null),
+  /** A medicine's generic name (e.g. Paracetamol), so it can be found by it. */
+  genericName: z.string().trim().max(120).nullable().default(null),
+  modifiers: z.array(modifierSchema).max(20).default([]),
+  /** For goods that arrive already counted (opening stock): the first batch's details. */
+  openingBatch: z.object({ batchNo: z.string().trim().min(1).max(60), expiresOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable() }).nullable().default(null),
+  openingSerials: z.array(z.string().trim().min(1).max(64)).max(500).default([]),
 });
 
 const hasAName = (p: { nameEn: string; nameBn: string }) => p.nameEn.length > 0 || p.nameBn.length > 0;
@@ -226,10 +269,19 @@ const paymentRefRule = (method: SupplierPaymentMethod, ref: string | null) => (m
 const paymentMethod = z.enum(SUPPLIER_PAYMENT_METHODS);
 const paymentRef = z.string().trim().min(1).max(64).nullable();
 
+/** What arrived for a batch- or serial-tracked product. Plain products leave these empty. */
+const arrivalFields = {
+  batchNo: z.string().trim().min(1).max(60).nullable().default(null),
+  expiresOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "bad_date").nullable().default(null),
+  serials: z.array(z.string().trim().min(1).max(64)).max(500).default([]),
+};
+export type Arrival = { batchNo: string | null; expiresOn: string | null; serials: string[] };
+
 export const purchaseLineSchema = z.object({
   productId: z.string().uuid(),
   qty: z.number().int().positive().max(MAX_QTY),
   unitCostPoisha: z.number().int().nonnegative().max(1_000_000_000),
+  ...arrivalFields,
 });
 
 const MAX_PURCHASE_POISHA = 10_000_000_000_000;
@@ -261,7 +313,7 @@ export const purchaseReceiveSchema = z
   .object({
     id: z.string().uuid(),
     /** Leave out to receive everything still outstanding. */
-    lines: z.array(z.object({ lineNo: z.number().int().positive(), qty: z.number().int().positive().max(MAX_QTY) })).max(500).optional(),
+    lines: z.array(z.object({ lineNo: z.number().int().positive(), qty: z.number().int().positive().max(MAX_QTY), ...arrivalFields })).max(500).optional(),
     paidPoisha: poisha,
     paymentMethod,
     paymentRef,
@@ -282,7 +334,7 @@ export type PurchaseSummary = {
 export type PurchaseDetail = PurchaseSummary & {
   discountPoisha: number;
   paidPoisha: number;
-  lines: { lineNo: number; productId: string; nameEn: string; nameBn: string; imageUrl: string | null; qty: number; receivedQty: number; returnedQty: number; unitCostPoisha: number; unit: Unit }[];
+  lines: { lineNo: number; productId: string; nameEn: string; nameBn: string; imageUrl: string | null; qty: number; receivedQty: number; returnedQty: number; unitCostPoisha: number; unit: Unit; tracking: Tracking }[];
 };
 
 export const customerInputSchema = z.object({
@@ -323,7 +375,8 @@ export const shiftCloseSchema = z.object({ id: z.string().uuid(), closedAt: z.st
 export type RecentSale = {
   id: string; receiptNo: string; soldAt: string; totalPoisha: number; tenderedPoisha: number; discountPoisha: number; vatPoisha: number; paymentMethod: string;
   bakiPaidMethod: string; customerId: string | null; cashierName: string | null; returnedPoisha: number; creditedPoisha: number;
-  lines: { lineNo: number; productId: string; name: string; qty: number; unitPricePoisha: number; unit: Unit; returnedQty: number; finalPoisha: number }[];
+  pointsPoisha?: number; giftCardPoisha?: number;
+  lines: { lineNo: number; productId: string; name: string; qty: number; unitPricePoisha: number; unit: Unit; returnedQty: number; finalPoisha: number; note?: string | null; serials?: string[] }[];
 };
 
 export const purchaseReturnSchema = z.object({
@@ -331,7 +384,7 @@ export const purchaseReturnSchema = z.object({
   lines: z.array(z.object({ lineNo: z.number().int().positive(), qty: z.number().int().positive().max(MAX_QTY) })).min(1, "no_lines").max(500),
 });
 
-export type CustomerSummary = { id: string; name: string; phone: string | null; address: string | null; duePoisha: number; creditLimitPoisha: number | null };
+export type CustomerSummary = { id: string; name: string; phone: string | null; address: string | null; duePoisha: number; creditLimitPoisha: number | null; points?: number };
 export type CustomerDetail = {
   customer: CustomerSummary;
   sales: { id: string; receiptNo: string; soldAt: string; totalPoisha: number; paidPoisha: number }[];
@@ -406,6 +459,8 @@ export const signupSchema = z.object({
   phone: phoneSchema.nullable(),
   pin: pinSchema,
   code: z.string().regex(/^\d{6}$/, "invalid_code"),
+  /** Picked on the website (e.g. from the pharmacy page), so onboarding starts with it selected. */
+  businessType: z.enum(BUSINESS_TYPES).nullable().default(null),
 });
 
 export const BILLING_METHODS = ["bkash", "nagad"] as const;
@@ -481,6 +536,12 @@ export type CatalogProduct = {
   variantOf: string | null;
   variantName: string | null;
   packs: Pack[];
+  tracking?: Tracking;
+  warrantyMonths?: number | null;
+  genericName?: string | null;
+  modifiers?: Modifier[];
+  /** Earliest expiry among batches still in stock at this branch. */
+  nextExpiry?: string | null;
 };
 
 export const storeSettingsSchema = z.object({
@@ -493,9 +554,28 @@ export const storeSettingsSchema = z.object({
   bin: z.string().trim().max(30).nullable(),
   address: z.string().trim().max(300).nullable(),
   phone: z.string().trim().max(30).nullable(),
+  /** Chosen during onboarding. Null until the owner has been through it. */
+  businessType: z.enum(BUSINESS_TYPES).nullable().default(null),
+  features: z.array(z.enum(FEATURES)).max(FEATURES.length).default([]),
+  /** Spend this much (poisha) to earn one point. */
+  loyaltyEarnPoisha: z.number().int().min(100).max(10_000_000).default(10_000),
+  /** What one point is worth when spent. */
+  loyaltyPointPoisha: z.number().int().min(1).max(100_000).default(100),
+  /** "direct" prints straight to a USB or serial thermal printer, which can also open the cash drawer. */
+  receiptPrinter: z.enum(["browser", "direct"]).default("browser"),
+  paperWidth: z.union([z.literal(58), z.literal(80)]).default(80),
+  cashDrawer: z.boolean().default(false),
+  kitchenTickets: z.boolean().default(false),
+  /** Batches expiring within this many days show as "expiring soon". */
+  expiryAlertDays: z.number().int().min(1).max(365).default(60),
+  onboarded: z.boolean().default(true),
 });
 export type StoreSettings = z.infer<typeof storeSettingsSchema>;
-export const DEFAULT_SETTINGS: StoreSettings = { vatEnabled: false, vatRateBp: 0, vatInclusive: true, scaleEnabled: false, scalePrefix: "21", scaleMode: "weight", bin: null, address: null, phone: null };
+export const DEFAULT_SETTINGS: StoreSettings = {
+  vatEnabled: false, vatRateBp: 0, vatInclusive: true, scaleEnabled: false, scalePrefix: "21", scaleMode: "weight", bin: null, address: null, phone: null,
+  businessType: null, features: [], loyaltyEarnPoisha: 10_000, loyaltyPointPoisha: 100, receiptPrinter: "browser", paperWidth: 80, cashDrawer: false, kitchenTickets: false, expiryAlertDays: 60, onboarded: false,
+};
+export const hasFeature = (s: Pick<StoreSettings, "features">, f: (typeof FEATURES)[number]) => s.features.includes(f);
 
 export type CatalogResponse = {
   store: { name: string };
@@ -503,6 +583,9 @@ export type CatalogResponse = {
   subscription: SubscriptionInfo | null;
   settings: StoreSettings;
   branch: { id: string; name: string };
+  /** Offers the till can apply without a connection. */
+  coupons?: CouponRecord[];
+  tables?: TableRecord[];
 };
 
 export type Lang = "en" | "bn";
@@ -533,6 +616,7 @@ const UNIT_LABELS: Record<Unit, Record<Lang, string>> = {
   box: { en: "box", bn: "বক্স" },
   pack: { en: "pack", bn: "প্যাকেট" },
   bag: { en: "bag", bn: "বস্তা" },
+  vori: { en: "vori", bn: "ভরি" },
 };
 /** The unit's full name, for choosing it in a form (pc has no short label on the till). */
 export const UNIT_NAMES: Record<Unit, Record<Lang, string>> = {
@@ -550,6 +634,7 @@ export const UNIT_NAMES: Record<Unit, Record<Lang, string>> = {
   box: { en: "Box", bn: "বক্স" },
   pack: { en: "Packet", bn: "প্যাকেট" },
   bag: { en: "Bag / sack", bn: "বস্তা" },
+  vori: { en: "Vori (11.664 g)", bn: "ভরি (১১.৬৬৪ গ্রাম)" },
 };
 export const unitLabel = (unit: Unit, lang: Lang) => UNIT_LABELS[unit][lang];
 export const formatQty = (qty: number, unit: Unit, lang: Lang) => `${qtyFormat[lang].format(qty / QTY_SCALE)}${unit === "pc" ? "" : ` ${UNIT_LABELS[unit][lang]}`}`;
@@ -561,7 +646,7 @@ export type PlatformMailSummary = {
   subject: string; preview: string; read: boolean; createdAt: string;
 };
 export type PlatformMail = PlatformMailSummary & {
-  textBody: string; htmlBody: string | null; messageId: string | null; inReplyTo: string | null; attachments: { filename: string; size: number }[]; sentBy: string | null;
+  textBody: string; htmlBody: string | null; messageId: string | null; inReplyTo: string | null; attachments: { filename: string; size: number; stored?: boolean }[]; sentBy: string | null;
 };
 export type MailboxInfo = { name: string; address: string; unread: number };
 export const mailSendSchema = z.object({
@@ -572,3 +657,103 @@ export const mailSendSchema = z.object({
   /** The message being answered, so the reply threads in the customer's mail app. */
   replyTo: z.string().uuid().nullable().default(null),
 });
+
+/* ---------- Batches, expiry and serial numbers ---------- */
+
+export type BatchRecord = {
+  id: string; productId: string; nameEn: string; nameBn: string; unit: Unit; batchNo: string; expiresOn: string | null; qty: number; branchName: string;
+};
+export type SerialRecord = {
+  id: string; productId: string; nameEn: string; nameBn: string; serial: string; status: "in_stock" | "sold" | "returned"; soldAt: string | null;
+  receiptNo: string | null; customerName: string | null; warrantyMonths: number | null; warrantyUntil: string | null;
+};
+export const writeOffSchema = z.object({ id: z.string().uuid(), qty: z.number().int().positive().max(MAX_QTY) });
+
+/* ---------- Restaurant ---------- */
+
+export const tableInputSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1, "name_required").max(40),
+  area: z.string().trim().max(40).nullable().default(null),
+  seats: z.number().int().min(1).max(100).nullable().default(null),
+});
+export type TableRecord = z.infer<typeof tableInputSchema>;
+
+/* ---------- Loyalty: points, coupons, gift cards ---------- */
+
+export const couponInputSchema = z
+  .object({
+    id: z.string().uuid(),
+    code: z.string().trim().toUpperCase().regex(/^[A-Z0-9-]{3,32}$/, "invalid_code_format"),
+    kind: z.enum(["percent", "fixed"]),
+    /** Percent in hundredths (1000 = 10%), or a fixed amount in poisha. */
+    value: z.number().int().positive().max(100_000_000),
+    minSpendPoisha: poisha.default(0),
+    maxDiscountPoisha: poisha.nullable().default(null),
+    validUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null),
+    maxUses: z.number().int().positive().max(1_000_000).nullable().default(null),
+    active: z.boolean().default(true),
+  })
+  .refine((c) => c.kind !== "percent" || c.value <= 10_000, { message: "bad_percent", path: ["value"] });
+export type CouponRecord = z.infer<typeof couponInputSchema> & { uses?: number };
+
+/** The discount a coupon gives on a bill of this size, or null when the bill doesn't qualify. */
+export function couponDiscount(c: CouponRecord, subtotalPoisha: number, today = new Date().toISOString().slice(0, 10)) {
+  if (!c.active || subtotalPoisha < c.minSpendPoisha) return null;
+  if (c.validUntil && today > c.validUntil) return null;
+  if (c.maxUses != null && (c.uses ?? 0) >= c.maxUses) return null;
+  const raw = c.kind === "percent" ? Math.round((subtotalPoisha * c.value) / 10_000) : c.value;
+  return Math.min(raw, c.maxDiscountPoisha ?? raw, subtotalPoisha);
+}
+
+/** Points earned on what the customer actually paid for, not on what they paid with points or a gift card. */
+export const pointsEarned = (paidPoisha: number, earnPoisha: number) => (earnPoisha > 0 ? Math.floor(Math.max(paidPoisha, 0) / earnPoisha) : 0);
+
+export const giftCardIssueSchema = z
+  .object({
+    id: z.string().uuid(),
+    code: z.string().trim().toUpperCase().regex(/^[A-Z0-9-]{4,32}$/, "invalid_code_format"),
+    amountPoisha: poisha.positive(),
+    method: z.enum(["cash", "bkash", "nagad", "card"]),
+    ref: z.string().trim().min(1).max(64).nullable(),
+    customerId: z.string().uuid().nullable().default(null),
+    expiresOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null),
+  })
+  .refine((g) => (g.method !== "bkash" && g.method !== "nagad") || g.ref !== null, "payment_ref_required");
+export type GiftCardRecord = { id: string; code: string; balancePoisha: number; initialPoisha: number; expiresOn: string | null; customerName: string | null; createdAt: string; disabled: boolean };
+export const pointsAdjustSchema = z.object({ id: z.string().uuid(), points: z.number().int().min(-10_000_000).max(10_000_000).refine((n) => n !== 0), note: z.string().trim().max(200).nullable() });
+
+/* ---------- Expenses and accounts ---------- */
+
+export const EXPENSE_CATEGORIES = ["rent", "salary", "utilities", "transport", "supplies", "repairs", "marketing", "food", "tax_fees", "other"] as const;
+export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
+export const EXPENSE_LABELS: Record<ExpenseCategory, { en: string; bn: string }> = {
+  rent: { en: "Shop rent", bn: "দোকানভাড়া" },
+  salary: { en: "Salaries", bn: "কর্মচারীর বেতন" },
+  utilities: { en: "Electricity, gas & water", bn: "বিদ্যুৎ, গ্যাস ও পানির বিল" },
+  transport: { en: "Transport & delivery", bn: "যাতায়াত ও ডেলিভারি" },
+  supplies: { en: "Shop supplies", bn: "দোকানের টুকিটাকি" },
+  repairs: { en: "Repairs", bn: "মেরামত" },
+  marketing: { en: "Marketing", bn: "প্রচার" },
+  food: { en: "Staff food & tea", bn: "কর্মচারীর খাবার ও চা" },
+  tax_fees: { en: "Tax, licence & fees", bn: "কর, লাইসেন্স ও ফি" },
+  other: { en: "Other", bn: "অন্যান্য" },
+};
+export const expenseInputSchema = z
+  .object({
+    id: z.string().uuid(),
+    category: z.enum(EXPENSE_CATEGORIES),
+    amountPoisha: poisha.positive(),
+    method: z.enum(["cash", "bkash", "nagad", "bank", "card"]),
+    ref: z.string().trim().min(1).max(64).nullable(),
+    note: z.string().trim().max(300).nullable(),
+    spentOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "bad_date"),
+  })
+  .refine((e) => (e.method !== "bkash" && e.method !== "nagad") || e.ref !== null, "payment_ref_required");
+export type ExpenseRecord = z.infer<typeof expenseInputSchema> & { createdByName: string | null };
+
+export type CashbookEntry = { at: string; kind: string; detail: string; method: string; inPoisha: number; outPoisha: number };
+export type ProfitLoss = {
+  salesPoisha: number; returnsPoisha: number; netSalesPoisha: number; vatPoisha: number; costOfGoodsPoisha: number; grossProfitPoisha: number;
+  expenses: { category: ExpenseCategory; amountPoisha: number }[]; expensesPoisha: number; writeOffsPoisha: number; netProfitPoisha: number;
+};

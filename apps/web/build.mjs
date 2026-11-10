@@ -2,6 +2,13 @@
 import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SHOPS as ALL_SHOPS } from "./shops.mjs";
+
+/** Same order as onboarding in the app; "Any retail shop" always last. */
+const ORDER = ["grocery", "general_store", "pharmacy", "restaurant", "tea_stall", "hardware", "furniture", "electronics", "auto_parts", "fashion", "jewellery", "cosmetics", "optical", "stationery", "bakery", "agro", "wholesale", "general"];
+const SHOPS = [...ALL_SHOPS].sort((a, b) => ORDER.indexOf(a.type) - ORDER.indexOf(b.type));
+/** Two of a shop's own features, so each card says something the title doesn't. */
+const teaser = (x, lang) => x[lang].features.slice(0, 2).map(([h]) => h).join(" · ");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, "dist");
@@ -19,17 +26,23 @@ cpSync(join(here, "public"), dist, { recursive: true });
 const ui = {
   en: {
     prefix: "/en", other: "/", otherLabel: "বাংলা", locale: "en_US",
-    demo: "Demo", contact: "Contact", features: "Features", pricing: "Pricing", openSource: "Open source", signIn: "Sign in", start: "Start free", privacy: "Privacy", terms: "Terms",
+    demo: "Demo", shopTypes: "For your shop", contact: "Contact", features: "Features", pricing: "Pricing", openSource: "Open source", signIn: "Sign in", start: "Start free", privacy: "Privacy", terms: "Terms",
     rights: "Lalcha POS. Open source software for shops in Bangladesh.",
   },
   bn: {
     prefix: "", other: "/en/", otherLabel: "English", locale: "bn_BD",
-    demo: "ডেমো", contact: "যোগাযোগ", features: "সুবিধা", pricing: "মূল্য", openSource: "ওপেন সোর্স", signIn: "সাইন ইন", start: "ফ্রি শুরু করুন", privacy: "প্রাইভেসি", terms: "শর্তাবলি",
+    demo: "ডেমো", shopTypes: "দোকান অনুযায়ী", contact: "যোগাযোগ", features: "সুবিধা", pricing: "মূল্য", openSource: "ওপেন সোর্স", signIn: "সাইন ইন", start: "ফ্রি শুরু করুন", privacy: "প্রাইভেসি", terms: "শর্তাবলি",
     rights: "Lalcha POS। বাংলাদেশের দোকানের জন্য ওপেন সোর্স সফটওয়্যার।",
   },
 };
 
+const ORG = { "@context": "https://schema.org", "@type": "Organization", "@id": `${SITE}/#org`, name: "Lalcha POS", url: SITE, logo: `${SITE}/logo.svg`, email: CONTACT, sameAs: [REPO], areaServed: "BD" };
+const crumbs = (items) => ({ "@context": "https://schema.org", "@type": "BreadcrumbList", itemListElement: items.map(([name, url], i) => ({ "@type": "ListItem", position: i + 1, name, item: `${SITE}${url}` })) });
+/** Every indexable page, with its Bangla and English addresses, for the sitemap. */
+const pages = [];
+
 function page({ lang, path, title, description, body, alt = true, schema = [], noindex = false }) {
+  if (!noindex && !pages.some((p) => p.path === path && p.alt === alt && (alt || p.lang === lang))) pages.push({ path, alt, lang });
   const u = ui[lang];
   const canonical = `${SITE}${alt ? u.prefix : ""}${path}`;
   const links = alt
@@ -57,18 +70,18 @@ ${links}
 <meta name="twitter:card" content="summary">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
-${schema.map((s) => `<script type="application/ld+json">${JSON.stringify(s)}</script>`).join("\n")}
+${[ORG, ...schema].map((s) => `<script type="application/ld+json">${JSON.stringify(s)}</script>`).join("\n")}
 </head>
 <body>
 <header class="site"><div class="wrap">
 <a class="logo" href="${u.prefix}/"><img src="/icon.svg" alt="" width="38" height="38">Lalcha POS</a>
 <nav class="top" aria-label="Main">
-<a href="${u.prefix}/#live">${u.demo}</a><a href="${u.prefix}/#features">${u.features}</a><a href="${u.prefix}/#pricing">${u.pricing}</a><a href="/open-source/">${u.openSource}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${otherHref}">${u.otherLabel}</a><a href="${u.prefix}/login/">${u.signIn}</a><a class="btn small" href="${u.prefix}/signup/">${u.start}</a>
+<a href="${u.prefix}/#live">${u.demo}</a><a href="${u.prefix}/for/">${u.shopTypes}</a><a href="${u.prefix}/#features">${u.features}</a><a href="${u.prefix}/#pricing">${u.pricing}</a><a href="/open-source/">${u.openSource}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${otherHref}">${u.otherLabel}</a><a href="${u.prefix}/login/">${u.signIn}</a><a class="btn small" href="${u.prefix}/signup/">${u.start}</a>
 </nav>
 </div></header>
 ${body}
 <footer><div class="wrap"><span>© ${new Date().getFullYear()} ${u.rights}</span>
-<nav aria-label="Footer"><a href="/open-source/">${u.openSource}</a><a href="/terms/">${u.terms}</a><a href="/privacy/">${u.privacy}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${REPO}">GitHub</a><a href="mailto:${CONTACT}">${CONTACT}</a></nav>
+<nav aria-label="Footer">${SHOPS.map((x) => `<a href="${u.prefix}/for/${x.slug}/">${x[lang].name}</a>`).join("")}<a href="/open-source/">${u.openSource}</a><a href="/terms/">${u.terms}</a><a href="/privacy/">${u.privacy}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${REPO}">GitHub</a><a href="mailto:${CONTACT}">${CONTACT}</a></nav>
 </div></footer>
 </body></html>
 `;
@@ -101,7 +114,14 @@ const home = {
       ["Multiple branches", "Separate stock per branch, stock transfers, and reports for one branch or all of them."],
       ["Staff under control", "Owner, manager and cashier roles, PIN sign-in, shift cash counts and a full activity log."],
       ["Profit reports", "Sales, profit, payments and top products, exportable to Excel and PDF."],
+      ["Batches and expiry dates", "For pharmacies and cosmetics: batch numbers, expiry alerts, and the earliest batch sold first."],
+      ["IMEI and warranty", "For mobile and electronics shops: a serial per piece on purchase and sale, and warranty lookup."],
+      ["Tables and kitchen tickets", "For restaurants: open orders by table, kitchen tickets and extras like extra cheese."],
+      ["Points, coupons, gift cards", "Bring regular customers back with points, Eid coupons and gift cards."],
+      ["Expenses and real profit", "Rent, salaries and bills, a cash book, profit after expenses, and an export for Excel or Tally."],
+      ["Thermal printer and cash drawer", "Print receipts straight to a USB thermal printer, in Bangla, and pop the cash drawer."],
     ],
+    shopsTitle: "Made for your kind of shop", shopsLead: "Pick your shop type when you start, and Lalcha POS switches on what that kind of shop needs.",
     pricingTitle: "Simple monthly pricing",
     month: "per month", devices: "devices", branches: "branches", choose: "Start free",
     enterprise: "Enterprise", custom: "Custom", enterpriseText: "For chains, many branches or special needs. We build a solution around your business.", talk: "Contact us",
@@ -132,7 +152,14 @@ const home = {
       ["একাধিক শাখা", "শাখা অনুযায়ী আলাদা স্টক, স্টক স্থানান্তর এবং এক বা সব শাখার রিপোর্ট।"],
       ["কর্মীদের নিয়ন্ত্রণ", "মালিক, ম্যানেজার ও ক্যাশিয়ার ভূমিকা, পিন সাইন-ইন, শিফটের ক্যাশ গণনা ও কার্যক্রমের হিসাব।"],
       ["লাভের রিপোর্ট", "বিক্রি, লাভ, পেমেন্ট ও সেরা পণ্যের রিপোর্ট। Excel ও PDF-এ নামানো যায়।"],
+      ["ব্যাচ ও মেয়াদ", "ফার্মেসি আর কসমেটিকসের জন্য: ব্যাচ নম্বর, মেয়াদের সতর্কতা, আগের মেয়াদ আগে বিক্রি।"],
+      ["আইএমইআই ও ওয়ারেন্টি", "মোবাইল ও ইলেকট্রনিক্সের জন্য: কেনা-বেচায় প্রতিটির সিরিয়াল, পরে ওয়ারেন্টি যাচাই।"],
+      ["টেবিল ও কিচেন টিকিট", "রেস্টুরেন্টের জন্য: টেবিল ধরে অর্ডার, কিচেন টিকিট আর বাড়তি চিজের মতো অপশন।"],
+      ["পয়েন্ট, কুপন, গিফট কার্ড", "পয়েন্ট, ঈদের কুপন আর গিফট কার্ড দিয়ে নিয়মিত ক্রেতাদের ফিরিয়ে আনুন।"],
+      ["খরচ ও আসল লাভ", "ভাড়া, বেতন, বিল, ক্যাশবুক, খরচ বাদে লাভ, আর এক্সেল বা ট্যালির জন্য নামানো।"],
+      ["থার্মাল প্রিন্টার ও ক্যাশ ড্রয়ার", "বাংলায় রসিদ সরাসরি ইউএসবি থার্মাল প্রিন্টারে, সাথে ক্যাশ ড্রয়ারও খোলে।"],
     ],
+    shopsTitle: "আপনার দোকানের মতো করে বানানো", shopsLead: "শুরুতে দোকানের ধরন বেছে নিন, Lalcha POS সেই দোকানে যা লাগে তা চালু করে দেবে।",
     pricingTitle: "সহজ মাসিক মূল্য",
     month: "প্রতি মাস", devices: "ডিভাইস", branches: "শাখা", choose: "ফ্রি শুরু করুন",
     enterprise: "Enterprise", custom: "কাস্টম", enterpriseText: "চেইন শপ, অনেক শাখা বা বিশেষ প্রয়োজনের জন্য। আপনার ব্যবসা অনুযায়ী সমাধান তৈরি করে দেব।", talk: "যোগাযোগ করুন",
@@ -164,6 +191,7 @@ for (const lang of ["bn", "en"]) {
 </div>
 </div></section>
 <section class="band alt" id="features"><div class="wrap"><h2>${c.featuresTitle}</h2><div class="grid">${c.list.map(([h, p]) => `<article class="card"><h3>${h}</h3><p>${p}</p></article>`).join("")}</div></div></section>
+<section class="band" id="shops"><div class="wrap"><h2>${c.shopsTitle}</h2><p class="lead">${c.shopsLead}</p><div class="grid shops">${SHOPS.map((x) => `<a class="card shop" href="${u.prefix}/for/${x.slug}/"><span class="shop-icon" aria-hidden="true">${x.icon}</span><h3>${x[lang].name}</h3><p>${teaser(x, lang)}</p></a>`).join("")}</div></div></section>
 <section class="band" id="pricing"><div class="wrap"><h2>${c.pricingTitle}</h2><div class="grid">${plans.map(([n, p, d, b]) => `<article class="card"><h3>${n}</h3><div class="price">${p}</div><p>${c.month} · ${d} ${c.devices} · ${b} ${c.branches}</p><p style="margin-top:14px"><a class="btn small" href="${u.prefix}/signup/">${c.choose}</a></p></article>`).join("")}<article class="card"><h3>${c.enterprise}</h3><div class="price">${c.custom}</div><p>${c.enterpriseText}</p><p style="margin-top:14px"><a class="btn small alt" href="${u.prefix}/contact/?topic=enterprise">${c.talk}</a></p></article></div></div></section>
 <section class="band alt"><div class="wrap"><h2>${c.faqTitle}</h2>${c.faq.map(([q, a]) => `<details><summary>${q}</summary><p>${a}</p></details>`).join("")}</div></section>
 </main>`;
@@ -257,6 +285,119 @@ write("open-source", page({ lang: "en", alt: false, path: "/open-source/", title
 ]) }));
 writeFileSync(join(dist, "404.html"), page({ lang: "en", alt: false, noindex: true, path: "/404", title: "Page not found | Lalcha POS", description: "This page could not be found.", body: `<main class="doc"><h1>Page not found</h1><p><a class="btn" href="/">Go home</a></p></main>` }));
 
-const urls = ["/", "/en/", "/signup/", "/en/signup/", "/login/", "/en/login/", "/contact/", "/en/contact/", "/open-source/", "/terms/", "/privacy/"];
-writeFileSync(join(dist, "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((u) => `<url><loc>${SITE}${u}</loc></url>`).join("\n")}\n</urlset>\n`);
-console.log(`Website built: ${urls.length} pages`);
+/* ---------- One page per kind of shop, and a page listing them ---------- */
+
+const shopUi = {
+  en: { all: "Lalcha POS for every kind of shop", allLead: "Pick your kind of shop to see what Lalcha POS does for it. Every shop gets billing, stock, baki, suppliers, returns, reports, staff and branches.", features: "What you get", how: "How to start", faq: "Questions", start: "Start free for 14 days", demo: "Try the demo", home: "Home", others: "Other kinds of shop", trial: "14 days free · No payment needed · Works without internet" },
+  bn: { all: "সব ধরনের দোকানের জন্য Lalcha POS", allLead: "আপনার দোকানের ধরন বেছে নিন, দেখুন Lalcha POS সেখানে কী কী করে। সব দোকানেই থাকছে বিল, স্টক, বাকির খাতা, সরবরাহকারী, ফেরত, রিপোর্ট, কর্মী আর শাখা।", features: "যা যা পাবেন", how: "কীভাবে শুরু করবেন", faq: "প্রশ্ন ও উত্তর", start: "১৪ দিন ফ্রি শুরু করুন", demo: "ডেমো দেখুন", home: "হোম", others: "অন্য ধরনের দোকান", trial: "১৪ দিন ফ্রি · কোনো পেমেন্ট লাগবে না · ইন্টারনেট ছাড়াও চলে" },
+};
+
+for (const lang of ["bn", "en"]) {
+  const u = ui[lang];
+  const s = shopUi[lang];
+  const base = lang === "en" ? "en/" : "";
+  write(`${base}for`, page({
+    lang, path: "/for/", title: `${s.all} | Lalcha POS`, description: s.allLead,
+    schema: [crumbs([[s.home, `${u.prefix}/`], [u.shopTypes, `${u.prefix}/for/`]]), { "@context": "https://schema.org", "@type": "ItemList", itemListElement: SHOPS.map((x, i) => ({ "@type": "ListItem", position: i + 1, url: `${SITE}${u.prefix}/for/${x.slug}/`, name: x[lang].h1 })) }],
+    body: `<main><section class="hero"><div class="wrap"><h1>${s.all}</h1><p class="lead">${s.allLead}</p></div></section>
+<section class="band"><div class="wrap"><div class="grid shops">${SHOPS.map((x) => `<a class="card shop" href="${u.prefix}/for/${x.slug}/"><span class="shop-icon" aria-hidden="true">${x.icon}</span><h2>${x[lang].name}</h2><p>${x[lang].description}</p></a>`).join("")}</div></div></section></main>`,
+  }));
+
+  for (const shop of SHOPS) {
+    const c = shop[lang];
+    const path = `/for/${shop.slug}/`;
+    const signup = `${u.prefix}/signup/?type=${shop.type}`;
+    write(`${base}for/${shop.slug}`, page({
+      lang, path, title: c.title, description: c.description,
+      schema: [
+        crumbs([[s.home, `${u.prefix}/`], [u.shopTypes, `${u.prefix}/for/`], [c.name, `${u.prefix}${path}`]]),
+        {
+          "@context": "https://schema.org", "@type": "SoftwareApplication", name: `Lalcha POS — ${c.name}`, applicationCategory: "BusinessApplication", applicationSubCategory: "Point of sale",
+          operatingSystem: "Web, Android, iOS, Windows, macOS", url: `${SITE}${u.prefix}${path}`, description: c.lead, inLanguage: ["bn", "en"], publisher: { "@id": `${SITE}/#org` },
+          audience: { "@type": "BusinessAudience", audienceType: c.name, geographicArea: { "@type": "Country", name: "Bangladesh" } },
+          featureList: c.features.map(([h]) => h),
+          offers: [{ "@type": "Offer", name: "Starter", price: "499", priceCurrency: "BDT" }, { "@type": "Offer", name: "Growth", price: "999", priceCurrency: "BDT" }],
+        },
+        { "@context": "https://schema.org", "@type": "HowTo", name: c.h1, step: c.steps.map((text, i) => ({ "@type": "HowToStep", position: i + 1, text })) },
+        { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: c.faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+      ],
+      body: `<main>
+<nav class="crumbs wrap" aria-label="Breadcrumb"><a href="${u.prefix}/">${s.home}</a> › <a href="${u.prefix}/for/">${u.shopTypes}</a> › <span>${c.name}</span></nav>
+<section class="hero"><div class="wrap"><p class="shop-icon big" aria-hidden="true">${shop.icon}</p><h1>${c.h1}</h1><p class="lead answer">${c.lead}</p>
+<div class="cta"><a class="btn" href="${signup}">${s.start}</a><a class="btn alt" href="${DEMO_URL}" target="_blank" rel="noopener">${s.demo}</a></div><p class="note">${s.trial}</p></div></section>
+<section class="band alt"><div class="wrap"><h2>${s.features}</h2><div class="grid">${c.features.map(([h, p]) => `<article class="card"><h3>${h}</h3><p>${p}</p></article>`).join("")}</div></div></section>
+<section class="band"><div class="wrap"><h2>${s.how}</h2><ol class="steps">${c.steps.map((x) => `<li>${x}</li>`).join("")}</ol><p><a class="btn" href="${signup}">${s.start}</a></p></div></section>
+<section class="band alt"><div class="wrap"><h2>${s.faq}</h2>${c.faq.map(([q, a]) => `<details open><summary>${q}</summary><p>${a}</p></details>`).join("")}</div></section>
+<section class="band"><div class="wrap"><h2>${s.others}</h2><p class="chips">${SHOPS.filter((x) => x !== shop).map((x) => `<a href="${u.prefix}/for/${x.slug}/">${x.icon} ${x[lang].name}</a>`).join("")}</p></div></section>
+</main>`,
+    }));
+  }
+}
+
+/* ---------- Sitemap, robots and llms.txt ---------- */
+
+const today = new Date().toISOString().slice(0, 10);
+const entry = (loc, alternates) =>
+  `<url><loc>${SITE}${loc}</loc><lastmod>${today}</lastmod>${alternates.map(([l, href]) => `<xhtml:link rel="alternate" hreflang="${l}" href="${SITE}${href}"/>`).join("")}</url>`;
+const sitemap = pages.flatMap((p) =>
+  p.alt
+    ? [entry(p.path, [["bn", p.path], ["en", `/en${p.path}`], ["x-default", p.path]]), entry(`/en${p.path}`, [["bn", p.path], ["en", `/en${p.path}`], ["x-default", p.path]])]
+    : [entry(p.path, [])],
+);
+writeFileSync(join(dist, "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n${sitemap.join("\n")}\n</urlset>\n`);
+
+// AI search and assistants are welcome: they read the same public pages people do.
+writeFileSync(join(dist, "robots.txt"), `User-agent: *\nAllow: /\nDisallow: /signup/?\n\nUser-agent: GPTBot\nAllow: /\n\nUser-agent: OAI-SearchBot\nAllow: /\n\nUser-agent: ClaudeBot\nAllow: /\n\nUser-agent: PerplexityBot\nAllow: /\n\nUser-agent: Google-Extended\nAllow: /\n\nSitemap: ${SITE}/sitemap.xml\n`);
+
+const en = (x) => x.en;
+writeFileSync(join(dist, "llms.txt"), `# Lalcha POS
+
+> Lalcha POS is an open source (AGPL-3.0), offline-first point of sale and shop management app for small and medium shops in Bangladesh. It works in Bangla and English, in any browser, and keeps selling without internet. Hosted plans start at ৳499 per month after a 14-day free trial.
+
+Key facts:
+- Billing with product photos and barcode scanners; loose goods by kg, litre, metre or feet; packs and variants.
+- Baki (customer credit) with limits; suppliers, purchases and dues; returns; staff roles with PINs; multiple branches.
+- Optional features per shop type: batches and expiry dates, IMEI/serial numbers with warranty, restaurant tables and kitchen tickets, loyalty points, coupons and gift cards, expenses with profit and loss.
+- Payments recorded: cash, bKash, Nagad, card and baki. Mushak 6.3 VAT details on invoices.
+- Direct printing to ESC/POS thermal printers (Bangla included) and cash drawer, in Chrome or Edge.
+
+## Pages for each kind of shop
+${SHOPS.map((x) => `- [${en(x).h1}](${SITE}/en/for/${x.slug}/): ${en(x).description}`).join("\n")}
+
+## Main pages
+- [Home (Bangla)](${SITE}/): overview, live demo and pricing
+- [Home (English)](${SITE}/en/)
+- [Live demo](https://demo.lalcha.com/): a sample shop that resets every hour
+- [Contact](${SITE}/en/contact/)
+- [Open source](${SITE}/open-source/)
+
+## Optional
+- [Full details for AI assistants](${SITE}/llms-full.txt)
+- [Source code](${REPO})
+`);
+writeFileSync(join(dist, "llms-full.txt"), `# Lalcha POS — full details
+
+${home.en.description}
+
+## Features
+${home.en.list.map(([h, p]) => `- ${h}: ${p}`).join("\n")}
+
+## Pricing
+- Starter: ৳499 per month, 2 devices, 1 branch
+- Growth: ৳999 per month, 5 devices, 3 branches
+- Enterprise: custom, for chains and special needs (contact ${CONTACT})
+- 14-day free trial, no payment needed to start
+
+## Frequently asked questions
+${home.en.faq.map(([q, a]) => `### ${q}\n${a}`).join("\n\n")}
+
+${SHOPS.map((x) => `## ${en(x).h1}
+${en(x).lead}
+
+${en(x).features.map(([h, p]) => `- ${h}: ${p}`).join("\n")}
+
+${en(x).faq.map(([q, a]) => `### ${q}\n${a}`).join("\n\n")}
+
+Page: ${SITE}/en/for/${x.slug}/ (Bangla: ${SITE}/for/${x.slug}/)`).join("\n\n")}
+`);
+console.log(`Website built: ${pages.length} pages (${sitemap.length} sitemap entries)`);

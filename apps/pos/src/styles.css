@@ -85,6 +85,11 @@ button {
   body * {
     visibility: hidden;
   }
+  /* 58 mm paper: narrower receipt, slightly smaller type. */
+  #receipt.receipt-58 {
+    width: 52mm !important;
+    font-size: 11px;
+  }
   #receipt,
   #receipt * {
     visibility: visible;
