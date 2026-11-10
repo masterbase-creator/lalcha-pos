@@ -1,7 +1,7 @@
 // Sample store used for local development and for the public demo at demo.<base domain>.
 import { computeBill } from "@lalcha/domain";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { listObjects, putObject } from "./storage.ts";
 import { and, eq } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { hashPin } from "./secrets.ts";
@@ -45,6 +45,32 @@ export const SEED: [string, string, string, string, number, number, Shape, strin
   ["SOAP", "Bath Soap", "গোসলের সাবান", "home_care", 65, 58, "box", "#FF8FAB"],
   ["DETER", "Detergent Powder 1kg", "ডিটারজেন্ট ১ কেজি", "home_care", 160, 28, "sack", "#4361EE"],
   ["PASTE", "Toothpaste 100g", "টুথপেস্ট ১০০ গ্রাম", "home_care", 95, 4, "tube", "#2EC4B6"],
+  ["CHINI1", "Chinigura Rice 1kg", "চিনিগুঁড়া চাল ১ কেজি", "staples", 155, 34, "sack", "#F4E3B2"],
+  ["MOONG1", "Moong Dal 1kg", "মুগ ডাল ১ কেজি", "staples", 175, 22, "packet", "#B5C99A"],
+  ["CHOLA", "Chickpeas 500g", "ছোলা ৫০০ গ্রাম", "staples", 70, 40, "packet", "#D4A373"],
+  ["SUJI", "Semolina 500g", "সুজি ৫০০ গ্রাম", "staples", 65, 27, "packet", "#FAEDCD"],
+  ["CUMIN", "Cumin Powder 100g", "জিরা গুঁড়া ১০০ গ্রাম", "oil_spice", 120, 18, "jar", "#A47148"],
+  ["CORIA", "Coriander Powder 200g", "ধনিয়া গুঁড়া ২০০ গ্রাম", "oil_spice", 85, 24, "jar", "#BC6C25"],
+  ["GARAM", "Garam Masala 50g", "গরম মসলা ৫০ গ্রাম", "oil_spice", 70, 31, "box", "#9C6644"],
+  ["GHEE", "Ghee 200g", "ঘি ২০০ গ্রাম", "oil_spice", 360, 12, "jar", "#F6BD60"],
+  ["COFFEE", "Instant Coffee 50g", "ইনস্ট্যান্ট কফি ৫০ গ্রাম", "drinks", 260, 15, "jar", "#6F4518"],
+  ["LEMSODA", "Lemon Soda 250ml", "লেমন সোডা ২৫০ মিলি", "drinks", 35, 48, "can", "#B7E4C7"],
+  ["ENERGY", "Energy Drink 250ml", "এনার্জি ড্রিংক ২৫০ মিলি", "drinks", 40, 36, "can", "#F94144"],
+  ["CHANA", "Chanachur 250g", "চানাচুর ২৫০ গ্রাম", "snacks", 60, 44, "packet", "#F3722C"],
+  ["CREAMB", "Cream Biscuits", "ক্রিম বিস্কুট", "snacks", 30, 70, "packet", "#CDB4DB"],
+  ["MURI", "Puffed Rice 500g", "মুড়ি ৫০০ গ্রাম", "snacks", 45, 35, "packet", "#FFF3B0"],
+  ["PEANUT", "Peanuts 200g", "চিনাবাদাম ২০০ গ্রাম", "snacks", 55, 29, "packet", "#E6B8A2"],
+  ["GARLIC", "Garlic 500g", "রসুন ৫০০ গ্রাম", "fresh", 110, 25, "produce", "#F8EDEB"],
+  ["GINGER", "Ginger 250g", "আদা ২৫০ গ্রাম", "fresh", 60, 20, "produce", "#DDB892"],
+  ["GCHILI", "Green Chilli 250g", "কাঁচা মরিচ ২৫০ গ্রাম", "fresh", 40, 18, "produce", "#52B788"],
+  ["TOMATO", "Tomato 1kg", "টমেটো ১ কেজি", "fresh", 80, 30, "produce", "#E63946"],
+  ["DISHBAR", "Dishwash Bar", "ডিশওয়াশ বার", "home_care", 35, 62, "box", "#80ED99"],
+  ["FLOOR", "Floor Cleaner 500ml", "ফ্লোর ক্লিনার ৫০০ মিলি", "home_care", 150, 16, "bottle", "#4CC9F0"],
+  ["COIL", "Mosquito Coil 10 pcs", "মশার কয়েল ১০টি", "home_care", 75, 40, "box", "#2D6A4F"],
+  ["SHAMPOO", "Shampoo 180ml", "শ্যাম্পু ১৮০ মিলি", "personal_care", 220, 23, "bottle", "#B392AC"],
+  ["COCOIL", "Coconut Oil 200ml", "নারকেল তেল ২০০ মিলি", "personal_care", 140, 27, "bottle", "#E9F5DB"],
+  ["FACEW", "Face Wash 100ml", "ফেসওয়াশ ১০০ মিলি", "personal_care", 180, 14, "tube", "#90E0EF"],
+  ["DIAPER", "Baby Diapers M (20)", "বাচ্চার ডায়াপার M (২০টি)", "baby", 650, 11, "packet", "#A2D2FF"],
 ];
 
 function pack(shape: Shape, c: string) {
@@ -86,6 +112,20 @@ export function artwork(shape: Shape, color: string, label: string) {
     ? `<text x="200" y="${y}" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="${words.length > 12 ? 18 : 24}" font-weight="800" fill="#12130F">${words}</text>`
     : "";
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">${pack(shape, color)}${text}</svg>`;
+}
+
+/**
+ * Sample pictures go where every product photo goes (R2 when it's set up, a local folder otherwise).
+ * Ones already stored are skipped, and a picture that can't be saved never stops the demo from resetting.
+ */
+async function samplePictures() {
+  const stored = new Set((await listObjects("products/").catch(() => [])).map((o) => o.key));
+  return {
+    async save(file: string, svg: string) {
+      if (stored.has(`products/${file}`)) return;
+      await putObject(`products/${file}`, Buffer.from(svg), "image/svg+xml").catch((e) => console.error(`sample picture ${file} not saved:`, e instanceof Error ? e.message : e));
+    },
+  };
 }
 
 /** Stable IDs keep seeding repeatable. */
@@ -148,12 +188,12 @@ export async function seedStore(db: Db, subdomain: "demo" | "other", name: strin
   const [anySale] = await db.select({ id: sales.id }).from(sales).where(eq(sales.storeId, storeId)).limit(1);
   const history = anySale ? null : sampleHistory(storeId, mainBranch);
 
-  mkdirSync(opts.imageDir, { recursive: true });
+  const pictures = await samplePictures();
   let n = 0;
   for (const [sku, nameEn, nameBn, category, price, qty, shape, color] of SEED) {
     n += 1;
     const id = stableUuid(`${subdomain}:${sku}`);
-    writeFileSync(new URL(`${sku}.svg`, opts.imageDir), artwork(shape, color, nameEn));
+    await pictures.save(`${sku}.svg`, artwork(shape, color, nameEn));
     await db.insert(products).values({
       storeId, id, sku, barcode: `899000000${String(n).padStart(4, "0")}`, nameEn, nameBn, category,
       pricePoisha: price * 100, costPoisha: Math.round(price * 85), imageUrl: `/products/${sku}.svg`,
@@ -164,7 +204,7 @@ export async function seedStore(db: Db, subdomain: "demo" | "other", name: strin
       occurredAt: new Date(Date.now() - 15 * DAY),
     }).onConflictDoNothing();
   }
-  await seedVariantsAndPacks(db, storeId, mainBranch, opts.imageDir);
+  await seedVariantsAndPacks(db, storeId, mainBranch, pictures);
   await db.insert(coupons).values({ storeId, id: stableUuid("demo:coupon:eid"), code: "EID10", kind: "percent", value: 1000, minSpendPoisha: 50_000, maxDiscountPoisha: 20_000 }).onConflictDoNothing();
   if (!history) return storeId;
   const owner = stableUuid(`user:${subdomain}:${DEMO_STAFF[subdomain][0][0]}`);
@@ -249,9 +289,9 @@ function sampleHistory(storeId: string, branchId: string) {
 }
 
 /** Shows the other ways to sell: rope by the foot or by the roll, cola by the can or six-pack, soap in three scents. */
-async function seedVariantsAndPacks(db: Db, storeId: string, branchId: string, imageDir: URL) {
+async function seedVariantsAndPacks(db: Db, storeId: string, branchId: string, pictures: Awaited<ReturnType<typeof samplePictures>>) {
   const sku = (k: string) => stableUuid(`demo:${k}`);
-  writeFileSync(new URL("ROPE.svg", imageDir), artwork("packet", "#B08968", "Nylon Rope"));
+  await pictures.save("ROPE.svg", artwork("packet", "#B08968", "Nylon Rope"));
   const extra = [
     { key: "ROPE", nameEn: "Nylon Rope", nameBn: "নাইলন দড়ি", category: "home_care", price: 5, unit: "feet" as const, stock: 500, image: "/products/ROPE.svg", variantOf: null, variantName: null },
     { key: "SOAP-ROSE", nameEn: "Bath Soap", nameBn: "গোসলের সাবান", category: "home_care", price: 70, unit: "pc" as const, stock: 24, image: "/products/SOAP.svg", variantOf: sku("SOAP"), variantName: "গোলাপ" },
