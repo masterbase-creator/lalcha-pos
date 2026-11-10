@@ -94,7 +94,9 @@ async function cleanup() {
   if (!usingR2) return console.log("cleanup: codes done; R2 not configured, so no file cleanup");
 
   // Photos no product points at any more (replaced, or upload abandoned). A week's grace covers uploads in flight.
-  const used = new Set(((await platformDb.execute(sql`select image_url from products where image_url is not null`)) as unknown as { image_url: string }[]).map((r) => r.image_url.slice(1)));
+  const used = new Set(
+    ((await platformDb.execute(sql`select image_url as url from products where image_url is not null union select logo_url from store_settings where logo_url is not null`)) as unknown as { url: string }[]).map((r) => r.url.slice(1)),
+  );
   let photos = 0;
   for (const o of await listObjects("products/")) {
     if (o.key.split("/").length !== 3 || used.has(o.key) || Date.now() - o.lastModified.getTime() < 7 * DAY) continue;

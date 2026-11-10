@@ -99,6 +99,13 @@
       "when": 1794306037482,
       "tag": "0013_bitter_loa",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794319386997,
+      "tag": "0014_skinny_human_torch",
+      "breakpoints": true
     }
   ]
 }

@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { config } from "./config.ts";
 import { mainBranchId } from "./branches.ts";
-import { audit, pgCode, withStore, type Env } from "./db.ts";
+import { audit, pgCode, withStore, type Env, type Tx } from "./db.ts";
 import { isDemoStore } from "./demo.ts";
 import { sendCode } from "./mail.ts";
 import { devices, loginCodes, sessions, subscriptions, users } from "./schema.ts";
@@ -102,6 +102,34 @@ const duplicateContact = (e: unknown) =>
   pgCode(e) !== "23505" ? null : String((e as { constraint_name?: string }).constraint_name ?? "").includes("email") ? "duplicate_email" : "duplicate_phone";
 const uuid = z.string().uuid();
 
+
+/** Connects a device for this person, within the plan's device limit. Returns its token, or "limit". */
+export async function connectDevice(tx: Tx, storeId: string, userId: string, deviceName: string) {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`devices:${storeId}`}, 0))`);
+  const [plan] = await tx.select({ plan: subscriptions.plan }).from(subscriptions).where(eq(subscriptions.storeId, storeId));
+  const [{ count }] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(devices)
+    .where(and(eq(devices.storeId, storeId), isNull(devices.revokedAt)));
+  if (count >= (planById(plan?.plan ?? "")?.maxDevices ?? 1)) return "limit" as const;
+  const token = newToken();
+  const deviceId = randomUUID();
+  await tx.insert(devices).values({ storeId, id: deviceId, name: deviceName, tokenHash: sha256(token), pairedBy: userId, branchId: await mainBranchId(tx, storeId) });
+  await audit(tx, storeId, userId, "device_connect", deviceId, { name: deviceName });
+  return token;
+}
+
+/**
+ * The hand-off from signup: lalcha.com and the store's own address are separate sites to the browser,
+ * so signup can't connect the device itself. It leaves a one-time code (5 minutes) that the store page
+ * trades for a connected device. Only a hash is stored, so the database never holds a usable code.
+ */
+export const handoffKey = (userId: string) => `handoff:${userId}`;
+export const handoffHash = (storeId: string, token: string) => sha256(`${config.otpPepper}:${storeId}:handoff:${token}`);
+export const HANDOFF_TTL_MS = 5 * 60_000;
+/** The code in the link is "<person>.<secret>": the person it connects, then the one-time secret. */
+export const handoffLink = (userId: string, secret: string) => `${userId}.${secret}`;
+
 export function registerAuth(app: Hono<Env>) {
   app.post("/v1/auth/request-code", async (c) => {
     const store = c.get("store");
@@ -139,6 +167,32 @@ export function registerAuth(app: Hono<Env>) {
     return c.json(!config.isProduction && code ? { ok: true, devCode: code } : { ok: true });
   });
 
+  app.post("/v1/auth/handoff", async (c) => {
+    const store = c.get("store");
+    const body = z
+      .object({ token: z.string().regex(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{20,128}$/), deviceName: z.string().trim().min(1).max(60) })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: "invalid_code" }, 400);
+    const [userId, secret] = body.data.token.split(".");
+    const result = await withStore(store.id, async (tx) => {
+      const [row] = await tx
+        .update(loginCodes)
+        .set({ attempts: sql`${loginCodes.attempts} + 1` })
+        .where(and(eq(loginCodes.storeId, store.id), eq(loginCodes.contact, handoffKey(userId)), gt(loginCodes.expiresAt, new Date()), sql`${loginCodes.attempts} < ${MAX_ATTEMPTS}`))
+        .returning({ codeHash: loginCodes.codeHash });
+      if (!row || !safeEqual(row.codeHash, handoffHash(store.id, secret))) return null;
+      // Used once: a copied or bookmarked link can't connect a second device.
+      await tx.delete(loginCodes).where(and(eq(loginCodes.storeId, store.id), eq(loginCodes.contact, handoffKey(userId))));
+      const [person] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.storeId, store.id), eq(users.id, userId), inArray(users.role, ["owner", "manager"]), isNull(users.disabledAt)));
+      return person ? connectDevice(tx, store.id, person.id, body.data.deviceName) : null;
+    });
+    if (result === "limit") return c.json({ error: "device_limit" }, 403);
+    return result ? c.json({ deviceToken: result }) : c.json({ error: "invalid_code" }, 401);
+  });
+
   app.post("/v1/auth/verify-code", async (c) => {
     const store = c.get("store");
     const body = z
@@ -170,18 +224,7 @@ export function registerAuth(app: Hono<Env>) {
         .from(users)
         .where(and(eq(users.storeId, store.id), userByContact(body.data), inArray(users.role, ["owner", "manager"]), isNull(users.disabledAt)));
       if (!user) return null;
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`devices:${store.id}`}, 0))`);
-      const [plan] = await tx.select({ plan: subscriptions.plan }).from(subscriptions).where(eq(subscriptions.storeId, store.id));
-      const [{ count }] = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(devices)
-        .where(and(eq(devices.storeId, store.id), isNull(devices.revokedAt)));
-      if (count >= (planById(plan?.plan ?? "")?.maxDevices ?? 1)) return "limit" as const;
-      const token = newToken();
-      const deviceId = randomUUID();
-      await tx.insert(devices).values({ storeId: store.id, id: deviceId, name: deviceName, tokenHash: sha256(token), pairedBy: user.id, branchId: await mainBranchId(tx, store.id) });
-      await audit(tx, store.id, user.id, "device_connect", deviceId, { name: deviceName });
-      return token;
+      return connectDevice(tx, store.id, user.id, deviceName);
     });
     if (deviceToken === "limit") return c.json({ error: "device_limit" }, 403);
     return deviceToken ? c.json({ deviceToken }) : c.json({ error: "invalid_code" }, 401);

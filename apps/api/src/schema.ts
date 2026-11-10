@@ -487,6 +487,8 @@ export const storeSettings = pgTable("store_settings", {
   expiryAlertDays: integer("expiry_alert_days").notNull().default(60),
   /** False until the owner has picked the shop type and features once. */
   onboarded: boolean("onboarded").notNull().default(false),
+  /** The shop's own logo, shown instead of Lalcha's on its till, receipts and installed app. */
+  logoUrl: text("logo_url"),
 });
 
 export const purchaseReturns = pgTable(

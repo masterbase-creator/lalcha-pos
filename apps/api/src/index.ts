@@ -1,6 +1,8 @@
 import { serve } from "@hono/node-server";
 import {
   MAX_IMAGE_BYTES,
+  storeNameSchema,
+  type StoreBrand,
   computeBill,
   importRowsSchema,
   productCreateSchema,
@@ -22,17 +24,18 @@ import { z } from "zod";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { managers, registerAuth, requireDevice } from "./auth.ts";
+import { managers, registerAuth, requireDevice, requireRole, requireSession } from "./auth.ts";
 import { config } from "./config.ts";
 import { audit, db, pgCode, withStore, type Env, type Tx } from "./db.ts";
 import { ApiError } from "./http.ts";
 import { registerBranches } from "./branches.ts";
-import { getSettings, getSubscription, registerBilling, registerPlatform, registerPublic, requireActiveSubscription } from "./billing.ts";
+import { getSettings, getSubscription, registerBilling, registerLogin, registerPlatform, registerPublic, requireActiveSubscription } from "./billing.ts";
 import { registerCustomers } from "./customers.ts";
 import { registerDemo } from "./demo.ts";
 import { registerInbox } from "./inbox.ts";
 import { registerPurchases } from "./purchases.ts";
 import { registerReports } from "./reports.ts";
+import { storeSettings } from "./schema.ts";
 import { auditLog, branches, coupons, giftCardLedger, giftCards, loyaltyLedger, productPacks, products, restaurantTables, saleLines, sales, stockLedger, stores, users } from "./schema.ts";
 import { ensureBatch, receiveSerials, sellSerials, takeStock } from "./stock.ts";
 import { registerFeatures } from "./features.ts";
@@ -70,6 +73,7 @@ app.use("/v1/*", async (c, next) => {
 });
 
 registerPublic(app);
+registerLogin(app);
 registerPlatform(app);
 registerInbox(app);
 registerDemo(app);
@@ -383,6 +387,77 @@ app.put("/v1/products/:id/image", async (c) => {
   // Shared sample pictures sit outside the store's folder and are left alone.
   if (previous) await removeProductImage(store.id, previous);
   return c.json({ imageUrl });
+});
+
+/* ---------- The store's own brand: its name and logo instead of Lalcha's ---------- */
+
+const owners = [requireDevice, requireSession, requireRole("owner")] as const;
+
+async function brandOf(storeId: string, name: string): Promise<StoreBrand> {
+  const [row] = await withStore(storeId, (tx) => tx.select({ logoUrl: storeSettings.logoUrl }).from(storeSettings).where(eq(storeSettings.storeId, storeId)));
+  return { name, logoUrl: row?.logoUrl ?? null };
+}
+
+// Public: a till that isn't connected yet still shows whose shop it is.
+app.get("/v1/brand", async (c) => {
+  const store = c.get("store");
+  c.header("cache-control", "no-cache");
+  return c.json(await brandOf(store.id, store.name));
+});
+
+/** Installing the till on a phone gives the shop's own name and icon, not Lalcha's. */
+app.get("/v1/manifest.webmanifest", async (c) => {
+  const store = c.get("store");
+  const brand = await brandOf(store.id, store.name);
+  const type = (url: string) => (url.endsWith(".png") ? "image/png" : url.endsWith(".webp") ? "image/webp" : url.endsWith(".jpg") ? "image/jpeg" : "image/svg+xml");
+  const icon = brand.logoUrl ?? "/icon.svg?v=glass";
+  c.header("content-type", "application/manifest+json; charset=utf-8");
+  c.header("cache-control", "no-cache");
+  return c.body(
+    JSON.stringify({
+      name: brand.name, short_name: brand.name.slice(0, 24), start_url: "/", display: "standalone", background_color: "#FFFDF6", theme_color: "#FFFDF6",
+      icons: [{ src: icon, sizes: "any", type: type(icon), purpose: "any" }],
+    }),
+  );
+});
+
+app.put("/v1/store/name", ...owners, async (c) => {
+  const store = c.get("store");
+  const input = storeNameSchema.safeParse(await c.req.json().catch(() => null));
+  if (!input.success) return c.json({ error: input.error.issues[0]?.message ?? "invalid" }, 400);
+  await withStore(store.id, async (tx) => {
+    await tx.update(stores).set({ name: input.data.name }).where(eq(stores.id, store.id));
+    await audit(tx, store.id, c.get("user").id, "store_rename", store.id, { from: store.name, to: input.data.name });
+  });
+  return c.json({ ok: true });
+});
+
+app.put("/v1/store/logo", ...owners, async (c) => {
+  const store = c.get("store");
+  const bytes = Buffer.from(await c.req.arrayBuffer());
+  if (bytes.length > MAX_IMAGE_BYTES) return c.json({ error: "image_too_large" }, 413);
+  const ext = imageExtension(bytes);
+  if (!ext) return c.json({ error: "invalid_image" }, 415);
+  const logoUrl = await saveProductImage(store.id, `logo-${randomUUID()}.${ext}`, bytes);
+  const previous = await withStore(store.id, async (tx) => {
+    const [row] = await tx.select({ logoUrl: storeSettings.logoUrl }).from(storeSettings).where(eq(storeSettings.storeId, store.id));
+    await tx.insert(storeSettings).values({ storeId: store.id, logoUrl, onboarded: true }).onConflictDoUpdate({ target: storeSettings.storeId, set: { logoUrl } });
+    await audit(tx, store.id, c.get("user").id, "store_logo", store.id);
+    return row?.logoUrl ?? null;
+  });
+  if (previous) await removeProductImage(store.id, previous);
+  return c.json({ logoUrl });
+});
+
+app.delete("/v1/store/logo", ...owners, async (c) => {
+  const store = c.get("store");
+  const previous = await withStore(store.id, async (tx) => {
+    const [row] = await tx.select({ logoUrl: storeSettings.logoUrl }).from(storeSettings).where(eq(storeSettings.storeId, store.id));
+    await tx.update(storeSettings).set({ logoUrl: null }).where(eq(storeSettings.storeId, store.id));
+    return row?.logoUrl ?? null;
+  });
+  if (previous) await removeProductImage(store.id, previous);
+  return c.json({ ok: true });
 });
 
 const FOREIGN_KEY_VIOLATION = "23503";

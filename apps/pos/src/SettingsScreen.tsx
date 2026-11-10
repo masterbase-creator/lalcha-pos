@@ -4,6 +4,9 @@ import { v7 as uuidv7 } from "uuid";
 import type { StringKey } from "./i18n";
 import { loadTables } from "./local";
 import { PrinterSetup } from "./PrinterSetup";
+import { BrandMark, setBrand, useBrand } from "./brand";
+import { prepareProductImage } from "./image";
+import { useRef } from "react";
 import { apiFetch } from "./session";
 
 const field = "mt-1 h-13 w-full border-[3px] border-line bg-bg px-3 text-lg font-bold";
@@ -66,6 +69,8 @@ export function SettingsScreen({ settings, lang, t, online, onChanged }: { setti
     <main className="no-print min-h-0 flex-1 overflow-y-auto p-3">
       <form className="mx-auto max-w-lg space-y-3" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         {!online && <p role="alert" className="font-bold text-hot">{t("needOnline")}</p>}
+
+        <StoreIdentity t={t} online={online} onChanged={onChanged} />
 
         <section className={box}>
           <h1 className="text-2xl font-black">{t("shopType")}</h1>
@@ -191,6 +196,77 @@ function TablesSetup({ t, online, onChanged }: { t: (k: StringKey) => string; on
         <button disabled={!online} className="min-h-12 bg-[#12130f] px-3 font-black text-accent ring-2 ring-line disabled:opacity-40">{t("addTable")}</button>
       </form>
       {error && <p role="alert" className="font-bold text-hot">{error}</p>}
+    </section>
+  );
+}
+
+/** The shop's own name and logo, which replace Lalcha's everywhere on its address. */
+function StoreIdentity({ t, online, onChanged }: { t: (k: StringKey) => string; online: boolean; onChanged: () => Promise<void> }) {
+  const brand = useBrand();
+  const [name, setName] = useState(brand?.name ?? "");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (brand && !name) setName(brand.name);
+  }, [brand]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function saveName() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    const res = await apiFetch("/v1/store/name", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: name.trim() }) }).catch(() => null);
+    setBusy(false);
+    if (!res?.ok) return setMessage(t("saveFailed"));
+    setBrand({ name: name.trim(), logoUrl: brand?.logoUrl ?? null });
+    setMessage(t("saved"));
+    await onChanged();
+  }
+
+  async function upload(file: File | undefined) {
+    if (!file || busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const blob = await prepareProductImage(file);
+      const res = await apiFetch("/v1/store/logo", { method: "PUT", headers: { "content-type": blob.type }, body: blob });
+      if (!res.ok) throw new Error();
+      const { logoUrl } = (await res.json()) as { logoUrl: string };
+      setBrand({ name: brand?.name ?? name, logoUrl });
+      setMessage(t("saved"));
+      await onChanged();
+    } catch {
+      setMessage(t("badPhoto"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    setBusy(true);
+    const res = await apiFetch("/v1/store/logo", { method: "DELETE" }).catch(() => null);
+    setBusy(false);
+    if (!res?.ok) return setMessage(t("saveFailed"));
+    setBrand({ name: brand?.name ?? name, logoUrl: null });
+    await onChanged();
+  }
+
+  return (
+    <section className={box}>
+      <h1 className="text-2xl font-black">{t("storeIdentity")}</h1>
+      <p className="font-bold text-muted">{t("logoHelp")}</p>
+      <div className="flex items-center gap-3">
+        <div className="grid h-24 w-24 shrink-0 place-items-center border-[3px] border-line bg-tile"><BrandMark brand={{ name: name || brand?.name || "", logoUrl: brand?.logoUrl ?? null }} size={72} /></div>
+        <div className="flex flex-1 flex-col gap-2">
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }} />
+          <button type="button" disabled={!online || busy} className="min-h-12 border-[3px] border-line font-black disabled:opacity-40" onClick={() => fileRef.current?.click()}>{brand?.logoUrl ? t("changeLogo") : t("uploadLogo")}</button>
+          {brand?.logoUrl && <button type="button" disabled={!online || busy} className="min-h-10 font-bold text-hot underline disabled:opacity-40" onClick={() => void remove()}>{t("removeLogo")}</button>}
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <input aria-label={t("storeName")} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} className={`${field} mt-0 min-w-0 flex-1`} />
+        <button type="button" disabled={!online || busy || !name.trim() || name.trim() === brand?.name} className="min-h-13 shrink-0 bg-[#12130f] px-4 font-black text-accent ring-2 ring-line disabled:opacity-40" onClick={() => void saveName()}>{t("saveName")}</button>
+      </div>
+      {message && <p role="status" className="font-bold">{message}</p>}
     </section>
   );
 }

@@ -20,17 +20,19 @@ import {
   type PlatformStore,
   type SubscriptionInfo,
 } from "@lalcha/domain";
-import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { requireDevice, requireRole, requireSession } from "./auth.ts";
 import { sendCode } from "./mail.ts";
 import { issueCode, pinResetKey } from "./account.ts";
+import { HANDOFF_TTL_MS, handoffHash, handoffKey, handoffLink } from "./auth.ts";
+import { createHmac } from "node:crypto";
 import { config } from "./config.ts";
 import { audit, db, pgCode, platformDb, withStore, type Env, type Tx } from "./db.ts";
 import { ApiError, guarded, PAGE_SIZE, pageOf, parse } from "./http.ts";
-import { branches, platformAudit, platformCodes, platformSessions, sessions, signupCodes, storeSettings, stores, subscriptionPayments, subscriptions, users } from "./schema.ts";
+import { branches, loginCodes, platformAudit, platformCodes, platformSessions, sessions, signupCodes, storeSettings, stores, subscriptionPayments, subscriptions, users } from "./schema.ts";
 import { hashPin, newCode, newToken, safeEqual, sha256 } from "./secrets.ts";
 
 const CODE_TTL_MS = 5 * 60_000;
@@ -88,14 +90,48 @@ const platformSession: MiddlewareHandler<Env> = async (c, next) => {
   await next();
 };
 
+/** Turns a shop name into an address: "Rahim's Store & Co." → "rahims-store-co". Non-Latin letters are dropped. */
+export function slugify(text: string) {
+  return text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    .slice(0, 30)
+    .replace(/-+$/, "");
+}
+
+/** Up to four free addresses close to what they typed and their shop name, checked against the database in one query. */
+export async function suggestSubdomains(typed: string, storeName: string) {
+  const bases = [...new Set([slugify(typed), slugify(storeName), slugify(storeName).replace(/-/g, "")].filter((b) => b.length >= 2))];
+  if (!bases.length) return [];
+  const candidates: string[] = [];
+  for (const b of bases) {
+    const short = b.slice(0, 24).replace(/-+$/, "");
+    candidates.push(b, `${short}store`, `${short}-shop`, `${short}bd`, `${short}shop`, `${short}-bd`, `${short}24`, `my${short}`, `${short}${String(10 + Math.floor(Math.random() * 90))}`);
+  }
+  const valid = [...new Set(candidates)].filter((x) => subdomainSchema.safeParse(x).success);
+  if (!valid.length) return [];
+  const taken = new Set((await db.select({ subdomain: stores.subdomain }).from(stores).where(inArray(stores.subdomain, valid))).map((r) => r.subdomain));
+  return valid.filter((x) => !taken.has(x)).slice(0, 4);
+}
+
 export function registerPublic(app: Hono<Env>) {
   app.get(
     "/v1/public/subdomain",
     guarded(async (c) => {
-      const name = subdomainSchema.safeParse((c.req.query("name") ?? "").toLowerCase());
-      if (!name.success) return c.json({ available: false, reason: name.error.issues[0]?.message });
-      const [row] = await db.select({ id: stores.id }).from(stores).where(eq(stores.subdomain, name.data));
-      return c.json(row ? { available: false, reason: "subdomain_taken" } : { available: true });
+      const raw = (c.req.query("name") ?? "").toLowerCase().slice(0, 40);
+      const storeName = (c.req.query("store") ?? "").slice(0, 100);
+      const name = subdomainSchema.safeParse(raw);
+      if (name.success) {
+        const [row] = await db.select({ id: stores.id }).from(stores).where(eq(stores.subdomain, name.data));
+        if (!row) return c.json({ available: true });
+      }
+      // Taken, reserved or malformed: offer free ones to tap instead of leaving them to guess.
+      return c.json({ available: false, reason: name.success ? "subdomain_taken" : name.error.issues[0]?.message, suggestions: await suggestSubdomains(raw, storeName) });
     }),
   );
 
@@ -121,7 +157,7 @@ export function registerPublic(app: Hono<Env>) {
     guarded(async (c) => {
       const input = await parse(c, signupSchema);
       const [taken] = await db.select({ id: stores.id }).from(stores).where(eq(stores.subdomain, input.subdomain));
-      if (taken) throw new ApiError("subdomain_taken", 409);
+      if (taken) return c.json({ error: "subdomain_taken", suggestions: await suggestSubdomains(input.subdomain, input.storeName) }, 409);
 
       // Counted in its own step, so wrong guesses still count when the signup itself is refused.
       const [row] = await db
@@ -133,22 +169,117 @@ export function registerPublic(app: Hono<Env>) {
 
       const storeId = randomUUID();
       const pinHash = await hashPin(input.pin);
+      const handoff = newToken();
+      const ownerId = randomUUID();
       try {
         await withStore(storeId, async (tx) => {
           await tx.insert(stores).values({ id: storeId, subdomain: input.subdomain, name: input.storeName });
           await tx.insert(branches).values({ storeId, name: "Main" });
-          await tx.insert(users).values({ storeId, name: input.ownerName, email: input.email, phone: input.phone, role: "owner", pinHash });
+          await tx.insert(users).values({ storeId, id: ownerId, name: input.ownerName, email: input.email, phone: input.phone, role: "owner", pinHash });
           await tx.insert(subscriptions).values({ storeId, plan: TRIAL_PLAN, trialEndsAt: new Date(Date.now() + TRIAL_DAYS * 86_400_000) });
           if (input.businessType) {
             await tx.insert(storeSettings).values({ storeId, businessType: input.businessType, features: BUSINESS_PROFILES[input.businessType].features, onboarded: false });
           }
           await tx.delete(signupCodes).where(eq(signupCodes.contact, input.email));
+          await tx.insert(loginCodes).values({ storeId, contact: handoffKey(ownerId), codeHash: handoffHash(storeId, handoff), expiresAt: new Date(Date.now() + HANDOFF_TTL_MS), attempts: 0, lastSentAt: new Date() });
         });
       } catch (e) {
-        if (pgCode(e) === "23505") throw new ApiError("subdomain_taken", 409);
+        // Someone took it in the moment between the check and this press: offer free ones right away.
+        if (pgCode(e) === "23505") return c.json({ error: "subdomain_taken", suggestions: await suggestSubdomains(input.subdomain, input.storeName) }, 409);
         throw e;
       }
-      return c.json({ subdomain: input.subdomain, baseDomain: config.baseDomain }, 201);
+      return c.json({ subdomain: input.subdomain, baseDomain: config.baseDomain, handoff: handoffLink(ownerId, handoff) }, 201);
+    }),
+  );
+}
+
+/* ---------- One sign-in on lalcha.com for every store a person runs ---------- */
+
+const LOGIN_TICKET_MS = 15 * 60_000;
+const loginKey = (email: string) => `login:${email}`;
+/** After the email code checks out: a short-lived, signed pass that lists and opens that person's stores. */
+const signTicket = (email: string, expires: number) => {
+  const body = Buffer.from(JSON.stringify({ email, expires })).toString("base64url");
+  return `${body}.${createHmac("sha256", config.otpPepper).update(`login-ticket:${body}`).digest("base64url")}`;
+};
+function readTicket(ticket: string) {
+  const [body, mac] = ticket.split(".");
+  if (!body || !mac || !safeEqual(mac, createHmac("sha256", config.otpPepper).update(`login-ticket:${body}`).digest("base64url"))) return null;
+  const data = JSON.parse(Buffer.from(body, "base64url").toString()) as { email: string; expires: number };
+  return data.expires > Date.now() ? data.email : null;
+}
+
+/** Stores where this email belongs to an active owner or manager. Read across stores, so it uses the platform role. */
+async function storesOf(email: string) {
+  return (await platformDb.execute(sql`
+    select s.id as "storeId", s.subdomain, s.name, u.id as "userId", u.role, ss.logo_url as "logoUrl", s.suspended_at is not null as suspended
+    from users u join stores s on s.id = u.store_id left join store_settings ss on ss.store_id = s.id
+    where u.email = ${email} and u.role in ('owner', 'manager') and u.disabled_at is null
+    order by (u.role = 'owner') desc, s.name`)) as unknown as { storeId: string; subdomain: string; name: string; userId: string; role: string; logoUrl: string | null; suspended: boolean }[];
+}
+
+export function registerLogin(app: Hono<Env>) {
+  app.post(
+    "/v1/public/login/request-code",
+    guarded(async (c) => {
+      const { email } = await parse(c, z.object({ email: emailSchema }));
+      const has = (await storesOf(email)).length > 0;
+      const code = has
+        ? await db.transaction(async (tx) => {
+            const [existing] = await tx.select({ lastSentAt: signupCodes.lastSentAt }).from(signupCodes).where(eq(signupCodes.contact, loginKey(email)));
+            if (existing && Date.now() - existing.lastSentAt.getTime() < CODE_RESEND_MS) return null;
+            const value = newCode();
+            const row = { codeHash: signupHash(loginKey(email), value), expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0, lastSentAt: new Date() };
+            await tx.insert(signupCodes).values({ contact: loginKey(email), ...row }).onConflictDoUpdate({ target: signupCodes.contact, set: row });
+            return value;
+          })
+        : null;
+      // Same reply for an email with no store, so nobody can test who has an account.
+      if (code) await sendCode(email, code, "Lalcha POS: সাইন-ইন কোড");
+      return c.json(!config.isProduction && code ? { ok: true, devCode: code } : { ok: true });
+    }),
+  );
+
+  app.post(
+    "/v1/public/login/verify",
+    guarded(async (c) => {
+      const input = await parse(c, z.object({ email: emailSchema, code: z.string().regex(/^\d{6}$/, "invalid_code") }));
+      const [row] = await db
+        .update(signupCodes)
+        .set({ attempts: sql`${signupCodes.attempts} + 1` })
+        .where(and(eq(signupCodes.contact, loginKey(input.email)), sql`${signupCodes.expiresAt} > now()`, sql`${signupCodes.attempts} < ${MAX_ATTEMPTS}`))
+        .returning({ codeHash: signupCodes.codeHash });
+      if (!row || !safeEqual(row.codeHash, signupHash(loginKey(input.email), input.code))) throw new ApiError("invalid_code", 401);
+      await db.delete(signupCodes).where(eq(signupCodes.contact, loginKey(input.email)));
+      const list = await storesOf(input.email);
+      return c.json({
+        ticket: signTicket(input.email, Date.now() + LOGIN_TICKET_MS),
+        baseDomain: config.baseDomain,
+        stores: list.map(({ storeId, subdomain, name, role, logoUrl, suspended }) => ({ storeId, subdomain, name, role, logoUrl, suspended })),
+      });
+    }),
+  );
+
+  // Opening a store from the list connects this browser to it, like signup does: straight to the PIN screen.
+  app.post(
+    "/v1/public/login/open",
+    guarded(async (c) => {
+      const input = await parse(c, z.object({ ticket: z.string().max(2000), storeId: z.string().uuid() }));
+      let email: string | null = null;
+      try {
+        email = readTicket(input.ticket);
+      } catch {
+        email = null;
+      }
+      if (!email) throw new ApiError("login_expired", 401);
+      const entry = (await storesOf(email)).find((s) => s.storeId === input.storeId);
+      if (!entry) throw new ApiError("not_found", 404);
+      const secret = newToken();
+      await platformDb
+        .insert(loginCodes)
+        .values({ storeId: entry.storeId, contact: handoffKey(entry.userId), codeHash: handoffHash(entry.storeId, secret), expiresAt: new Date(Date.now() + HANDOFF_TTL_MS), attempts: 0, lastSentAt: new Date() })
+        .onConflictDoUpdate({ target: [loginCodes.storeId, loginCodes.contact], set: { codeHash: handoffHash(entry.storeId, secret), expiresAt: new Date(Date.now() + HANDOFF_TTL_MS), attempts: 0, lastSentAt: new Date() } });
+      return c.json({ subdomain: entry.subdomain, baseDomain: config.baseDomain, handoff: handoffLink(entry.userId, secret) });
     }),
   );
 }
@@ -168,7 +299,8 @@ export function registerBilling(app: Hono<Env>) {
     ...owners,
     guarded(async (c) => {
       const store = c.get("store");
-      const input = await parse(c, storeSettingsSchema);
+      // The logo only changes through its own upload, so saving settings can never wipe or forge it.
+      const { logoUrl: _ignored, ...input } = await parse(c, storeSettingsSchema);
       await withStore(store.id, async (tx) => {
         await tx.insert(storeSettings).values({ storeId: store.id, ...input }).onConflictDoUpdate({ target: storeSettings.storeId, set: input });
         await audit(tx, store.id, c.get("user").id, "settings_update", null, { vatEnabled: input.vatEnabled, vatRateBp: input.vatRateBp, vatInclusive: input.vatInclusive });

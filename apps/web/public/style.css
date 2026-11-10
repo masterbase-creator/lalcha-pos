@@ -134,3 +134,25 @@ ol.steps li::before { content:counter(step); position:absolute; left:14px; top:5
 .chips a .ico { width:22px; height:22px; }
 .chips a:hover { background:var(--accent); }
 footer nav { flex-wrap:wrap; }
+/* Sign-in: choosing between stores */
+.store-list { list-style:none; padding:0; margin:12px 0 18px; display:grid; gap:10px; }
+.store-pick { width:100%; display:flex; align-items:center; gap:14px; padding:12px 14px; background:var(--panel); border:3px solid var(--line); cursor:pointer; text-align:left; font:inherit; color:var(--ink); }
+.store-pick:hover { box-shadow:4px 4px 0 var(--ink); transform:translate(-2px,-2px); }
+.store-pick img, .store-pick .letter { width:48px; height:48px; flex:none; object-fit:contain; }
+.store-pick .letter { display:grid; place-items:center; background:var(--ink); color:var(--bg); font-weight:900; font-size:24px; border-radius:8px; }
+.store-pick .info { display:flex; flex-direction:column; min-width:0; flex:1; }
+.store-pick .info strong { font-size:20px; }
+.store-pick .info small { color:var(--muted); font-size:15px; }
+.store-pick .go { font-size:24px; font-weight:900; }
+#step-stores[aria-busy] { opacity:.5; pointer-events:none; }
+details.staff { margin-top:18px; border:0; padding:0; background:none; box-shadow:none; }
+details.staff summary { cursor:pointer; font-weight:700; color:var(--muted); }
+/* Signup: the store address with its .lalcha.com ending, and free alternatives to tap */
+.address-field { display:flex; align-items:stretch; margin-top:6px; }
+.address-field input { flex:1; min-width:0; margin-top:0 !important; border-right:0 !important; }
+.address-suffix { display:flex; align-items:center; padding:0 12px; border:3px solid var(--line); background:var(--bg); font-weight:800; color:var(--muted); white-space:nowrap; }
+.hint.ok { color:#1f7a55; font-weight:800; }
+.hint.bad { color:var(--hot); font-weight:800; }
+.suggest { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; font-size:15px; font-weight:700; color:var(--muted); }
+.suggest .chip { font:inherit; font-weight:800; color:var(--ink); background:var(--panel); border:2px solid var(--line); padding:6px 10px; cursor:pointer; }
+.suggest .chip:hover { background:var(--accent); }

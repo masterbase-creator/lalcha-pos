@@ -6,7 +6,9 @@ export type Line =
   | { kind: "text"; text: string; align?: "left" | "center"; bold?: boolean; size?: "normal" | "large" | "small" }
   | { kind: "pair"; left: string; right: string; bold?: boolean; size?: "normal" | "large" }
   | { kind: "rule" }
-  | { kind: "gap" };
+  | { kind: "gap" }
+  /** The shop's logo at the top of a receipt, printed in black and white. */
+  | { kind: "image"; src: string };
 
 type Writer = { write: (data: Uint8Array) => Promise<void>; label: string };
 
@@ -93,7 +95,20 @@ const DRAWER = [ESC, 0x70, 0x00, 0x19, 0xfa];
 const FONT = '"Hind Siliguri", "Lalcha Digits", "Archivo", sans-serif';
 
 /** Draws the lines on a canvas the printer's width and turns it into black-and-white raster rows. */
-function render(lines: Line[], paper: 58 | 80) {
+async function loadImages(lines: Line[]) {
+  const images = new Map<string, HTMLImageElement>();
+  for (const l of lines) {
+    if (l.kind !== "image" || images.has(l.src)) continue;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = l.src;
+    // A logo that won't load is skipped rather than stopping the receipt.
+    if (await img.decode().then(() => true, () => false)) images.set(l.src, img);
+  }
+  return images;
+}
+
+function render(lines: Line[], paper: 58 | 80, images: Map<string, HTMLImageElement> = new Map()) {
   const width = paper === 58 ? 384 : 576;
   const pad = 8;
   const px = { small: 20, normal: 24, large: 34 };
@@ -119,7 +134,18 @@ function render(lines: Line[], paper: 58 | 80) {
   const draw = (paint: boolean) => {
     let y = pad;
     for (const l of lines) {
-      if (l.kind === "gap") y += 12;
+      if (l.kind === "image") {
+        const img = images.get(l.src);
+        if (!img) continue;
+        const h = 96;
+        const w = Math.min(width - pad * 2, (img.naturalWidth / img.naturalHeight) * h);
+        if (paint) {
+          ctx.fillStyle = "#fff";
+          ctx.drawImage(img, (width - w) / 2, y, w, h);
+          ctx.fillStyle = "#000";
+        }
+        y += h + 10;
+      } else if (l.kind === "gap") y += 12;
       else if (l.kind === "rule") {
         if (paint) {
           ctx.fillRect(pad, y + 6, width - pad * 2, 2);
@@ -189,7 +215,7 @@ function rasterCommands(r: { raster: Uint8Array; bytesPerRow: number; height: nu
 export async function printDirect(lines: Line[], paper: 58 | 80, opts: { openDrawer?: boolean } = {}) {
   if (!writer && !(await reconnectPrinter())) throw new Error("no_printer");
   await document.fonts.ready;
-  const bytes = [...INIT, ...rasterCommands(render(lines, paper)), 0x0a, 0x0a, 0x0a, ...CUT, ...(opts.openDrawer ? DRAWER : [])];
+  const bytes = [...INIT, ...rasterCommands(render(lines, paper, await loadImages(lines))), 0x0a, 0x0a, 0x0a, ...CUT, ...(opts.openDrawer ? DRAWER : [])];
   try {
     await writer!.write(new Uint8Array(bytes));
   } catch (e) {

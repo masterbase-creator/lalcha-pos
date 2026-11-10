@@ -21,7 +21,40 @@ export function subscribeAuth(listener: () => void) {
 
 export async function initAuth() {
   deviceToken = await getMeta("device_token");
+  if (!deviceToken) await redeemHandoff();
   update({ status: deviceToken ? "paired" : "unpaired" });
+}
+
+/** A short name for the device, so the owner can tell their devices apart in Staff. */
+function guessDeviceName() {
+  const ua = navigator.userAgent;
+  const kind = /iPad|Tablet/i.test(ua) ? "Tablet" : /Android|iPhone|Mobile/i.test(ua) ? "Phone" : "Computer";
+  return `${kind} (first device)`;
+}
+
+/**
+ * Straight after signup the owner arrives with a one-time code after "#connect=". It is wiped from
+ * the address bar at once, then traded for this device's connection, so a new owner goes straight to
+ * the PIN screen instead of being asked for another email code. If it has expired or was already
+ * used, nothing breaks: the usual "connect with an email code" screen shows instead.
+ */
+async function redeemHandoff() {
+  const match = location.hash.match(/(?:^#|&)connect=([0-9a-f-]{36}\.[A-Za-z0-9_-]{20,128})/);
+  if (!match) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  try {
+    const res = await fetch("/v1/auth/handoff", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: match[1], deviceName: guessDeviceName() }),
+    });
+    if (!res.ok) return;
+    const { deviceToken: token } = (await res.json()) as { deviceToken: string };
+    await setMeta("device_token", token);
+    deviceToken = token;
+  } catch {
+    // Offline or blocked: the email-code screen is the fallback.
+  }
 }
 
 export const lock = () => {

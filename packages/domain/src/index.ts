@@ -516,6 +516,9 @@ export type PlatformPayment = {
 };
 
 export const MAX_IMAGE_BYTES = 1024 * 1024;
+/** What a store shows of itself before anyone signs in: its name and logo. */
+export type StoreBrand = { name: string; logoUrl: string | null };
+export const storeNameSchema = z.object({ name: z.string().trim().min(1, "name_required").max(100) });
 
 export const syncRequestSchema =z.object({ sales: z.array(z.unknown()).min(1).max(100) });
 
@@ -569,11 +572,13 @@ export const storeSettingsSchema = z.object({
   /** Batches expiring within this many days show as "expiring soon". */
   expiryAlertDays: z.number().int().min(1).max(365).default(60),
   onboarded: z.boolean().default(true),
+  /** Set only by uploading a logo; ignored when settings are saved. */
+  logoUrl: z.string().max(300).nullable().default(null),
 });
 export type StoreSettings = z.infer<typeof storeSettingsSchema>;
 export const DEFAULT_SETTINGS: StoreSettings = {
   vatEnabled: false, vatRateBp: 0, vatInclusive: true, scaleEnabled: false, scalePrefix: "21", scaleMode: "weight", bin: null, address: null, phone: null,
-  businessType: null, features: [], loyaltyEarnPoisha: 10_000, loyaltyPointPoisha: 100, receiptPrinter: "browser", paperWidth: 80, cashDrawer: false, kitchenTickets: false, expiryAlertDays: 60, onboarded: false,
+  businessType: null, features: [], loyaltyEarnPoisha: 10_000, loyaltyPointPoisha: 100, receiptPrinter: "browser", paperWidth: 80, cashDrawer: false, kitchenTickets: false, expiryAlertDays: 60, onboarded: false, logoUrl: null,
 };
 export const hasFeature = (s: Pick<StoreSettings, "features">, f: (typeof FEATURES)[number]) => s.features.includes(f);
 

@@ -1,5 +1,4 @@
-// Imported, so its address carries a fingerprint and a new logo shows at once.
-import logoUrl from "./logo.svg";
+import { BrandTitle, setBrand, useBrand } from "./brand";
 import {
   computeBill,
   computeTotals,
@@ -114,6 +113,11 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   const [serialFor, setSerialFor] = useState<Sellable | null>(null);
   const [kot, setKot] = useState<{ title: string; lines: CartLine[] } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const brand = useBrand();
+  // The catalogue carries the latest name and logo too, so a change on another till shows here.
+  useEffect(() => {
+    if (storeName && (brand?.name !== storeName || brand?.logoUrl !== (settings.logoUrl ?? null))) setBrand({ name: storeName, logoUrl: settings.logoUrl ?? null });
+  }, [storeName, settings.logoUrl]); // eslint-disable-line react-hooks/exhaustive-deps
   const sync = useSyncExternalStore(subscribeSync, getSyncState);
 
   const t = useCallback((k: StringKey) => strings[lang][k], [lang]);
@@ -436,8 +440,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   return (
     <div className="flex h-full flex-col">
       <header className="no-print flex items-center gap-3 border-b-[3px] border-line bg-panel px-4 py-2.5 text-text">
-        <span className="flex items-center gap-2 text-lg font-black"><img src={logoUrl} alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
-        <span className="truncate font-bold">{storeName}{branchName ? ` · ${branchName}` : ""}</span>
+        <BrandTitle brand={brand ?? (storeName ? { name: storeName, logoUrl: settings.logoUrl ?? null } : null)} branch={branchName} />
         <div className="ml-auto flex items-center gap-2 text-sm font-bold">
           <span className="flex items-center gap-1.5" role="status" data-testid="sync-status">
             <span className={`h-2.5 w-2.5 rounded-full ${sync.online ? "bg-[#1f7a55]" : "bg-[#d9360b]"}`} />
@@ -495,8 +498,8 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
           )}
         </div>
       )}
-      {user.role === "owner" && !settings.onboarded && sync.catalogVersion > 0 ? (
-        <Onboarding settings={settings} lang={lang} t={t} onDone={syncFresh} />
+      {user.role === "owner" && !settings.onboarded && sync.catalogVersion > 0 && dataVersion > 0 ? (
+        <Onboarding key={settings.businessType ?? "none"} settings={settings} lang={lang} t={t} onDone={syncFresh} />
       ) : view === "expiry" ? (
         <ExpiryScreen lang={lang} t={t} online={sync.online} alertDays={settings.expiryAlertDays} onChanged={syncFresh} />
       ) : view === "warranty" ? (
@@ -1274,6 +1277,7 @@ function receiptLines(sale: Sale, c: ReceiptContext): PrintLine[] {
   const money = (p: number) => formatTaka(p, lang);
   const subtotal = computeTotals(sale.lines, sale.discountPoisha).subtotalPoisha;
   const out: PrintLine[] = [];
+  if (settings.logoUrl) out.push({ kind: "image", src: settings.logoUrl });
   if (sale.vatPoisha > 0) out.push({ kind: "text", text: t("mushakTitle"), align: "center", bold: true, size: "small" });
   out.push({ kind: "text", text: c.storeName, align: "center", bold: true, size: "large" });
   for (const x of [settings.address, settings.phone, settings.bin ? `BIN: ${settings.bin}` : null]) if (x) out.push({ kind: "text", text: x, align: "center", size: "small" });
@@ -1353,6 +1357,7 @@ function Receipt({
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-3" role="dialog" aria-modal="true" aria-label={t("receipt")}>
       <div className="w-full max-w-sm">
         <div id="receipt" className={`border-[3px] border-line bg-panel p-4 text-sm ${settings.paperWidth === 58 ? "receipt-58" : ""}`}>
+          {settings.logoUrl && <img src={settings.logoUrl} alt="" className="mx-auto mb-1 h-16 w-16 object-contain" />}
           {sale.vatPoisha > 0 && <p className="text-center font-black">{t("mushakTitle")}</p>}
           <h2 className="text-center text-xl font-black">{storeName}</h2>
           {settings.address && <p className="text-center">{settings.address}</p>}

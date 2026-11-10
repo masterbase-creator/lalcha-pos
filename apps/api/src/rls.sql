@@ -32,12 +32,15 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON platform_codes, platform_sessions TO lal
 GRANT SELECT, INSERT, UPDATE ON platform_mail TO lalcha_platform;
 -- Scheduled cleanup: which photos are still used, and removing expired one-time codes.
 GRANT SELECT (image_url) ON products TO lalcha_platform;
+GRANT SELECT (store_id, logo_url) ON store_settings TO lalcha_platform;
 GRANT SELECT, DELETE ON login_codes, signup_codes TO lalcha_platform;
 -- The superadmin "reset owner PIN" button emails the owner a code; it never sets or shows a PIN.
 GRANT INSERT, UPDATE ON login_codes TO lalcha_platform;
 
 GRANT USAGE ON SCHEMA public TO lalcha_app;
 GRANT SELECT, INSERT ON stores TO lalcha_app;
+-- Owners can rename their shop; nothing else about the store row.
+GRANT UPDATE (name) ON stores TO lalcha_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON signup_codes TO lalcha_app;
 -- No UPDATE: a store can't extend its own subscription or mark its own payment approved.
 GRANT SELECT, INSERT ON subscriptions, subscription_payments TO lalcha_app;

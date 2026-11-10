@@ -1,6 +1,8 @@
 /** Wording for onboarding, batches, serials, restaurant, loyalty, accounts and printing. */
 export const featureStrings = {
   en: {
+    // Shop name and logo
+    storeIdentity: "Shop name and logo", uploadLogo: "Upload logo", changeLogo: "Change logo", removeLogo: "Remove logo", logoHelp: "Your tills, receipts, browser tab and installed app show this name and logo.", saveName: "Save name",
     // PIN reset and account
     forgotPin: "Forgot PIN?", resetTitle: "Set a new PIN", resetHelp: "Enter your email. We'll send a 6-digit code so you can set a new PIN.",
     resetCashierHelp: "Cashier? Ask the owner or a manager to set a new PIN for you in Staff.", codeSentEmail: "If this email belongs to an owner or manager here, a code is on its way. Check spam too.",
@@ -63,6 +65,7 @@ export const featureStrings = {
     invalid_range: "Choose a valid date range (up to a year).",
   },
   bn: {
+    storeIdentity: "দোকানের নাম ও লোগো", uploadLogo: "লোগো দিন", changeLogo: "লোগো বদলান", removeLogo: "লোগো সরান", logoHelp: "আপনার দোকানের অ্যাপ, রসিদ, ব্রাউজার ট্যাব আর মোবাইলে ইনস্টল করা অ্যাপে এই নাম ও লোগো দেখাবে।", saveName: "নাম সেভ করুন",
     forgotPin: "পিন ভুলে গেছেন?", resetTitle: "নতুন পিন দিন", resetHelp: "আপনার ইমেইল দিন। নতুন পিন দেওয়ার জন্য ৬ সংখ্যার একটা কোড পাঠাব।",
     resetCashierHelp: "ক্যাশিয়ার হলে মালিক বা ম্যানেজারকে বলুন, কর্মী পাতা থেকে নতুন পিন দিয়ে দেবেন।", codeSentEmail: "এই ইমেইল এই দোকানের মালিক বা ম্যানেজারের হলে কোড চলে গেছে। স্প্যাম ফোল্ডারও দেখে নিন।",
     newPinLabel: "নতুন পিন (৪–৬ সংখ্যা)", confirmPin: "নতুন পিন আবার দিন", pinMismatch: "দুটো পিন মেলেনি।", setNewPin: "নতুন পিন সেভ করুন",

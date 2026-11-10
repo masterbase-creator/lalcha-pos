@@ -1,5 +1,4 @@
-// Imported, so its address carries a fingerprint and a new logo shows at once.
-import logoUrl from "./logo.svg";
+import { BrandTitle, useBrand } from "./brand";
 import { ForgotPin } from "./PinReset";
 import type { Lang, StaffMember } from "@lalcha/domain";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
@@ -28,10 +27,11 @@ function useLang() {
 }
 
 function Shell({ lang, toggle, children, overlay }: { lang: Lang; toggle: () => void; children: React.ReactNode; overlay?: boolean }) {
+  const brand = useBrand();
   return (
     <div className={`no-print flex flex-col bg-bg ${overlay ? "fixed inset-0 z-[60]" : "h-full"}`}>
       <header className="flex items-center justify-between border-b-[3px] border-line bg-panel px-4 py-2.5">
-        <span className="flex items-center gap-2 text-lg font-black"><img src={logoUrl} alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
+        <BrandTitle brand={brand} />
         <button className="min-h-9 border-2 border-line px-3 text-sm font-bold text-text" onClick={toggle}>
           {lang === "bn" ? "EN" : "বাং"}
         </button>
