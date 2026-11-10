@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 100" role="img" aria-label="Lalcha POS">
+  <title>Lalcha POS</title>
+  <!-- The mark from icon.svg, then the name. Lal cha: red tea without milk. -->
+  <rect width="100" height="100" rx="22" fill="#D7FF3F"/>
+  <path d="M37 23c-5 5 5 8 0 13M49 19c-5 5 5 9 0 15" fill="none" stroke="#12130F" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M23.5 42h45l-5.5 40a5 5 0 0 1-5 4.3H34a5 5 0 0 1-5-4.3z" fill="#FFFDF6"/>
+  <path d="M25.6 54h40.8l-3.4 27.7a5 5 0 0 1-5 4.3H34a5 5 0 0 1-5-4.3z" fill="#B3261E"/>
+  <path d="M26.5 54h39" stroke="#7A1610" stroke-width="3"/>
+  <path d="M32 59l2.5 21" stroke="#E2563C" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M23.5 42h45l-5.5 40a5 5 0 0 1-5 4.3H34a5 5 0 0 1-5-4.3z" fill="none" stroke="#12130F" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="69" cy="42" r="12.5" fill="#F7E04B" stroke="#12130F" stroke-width="4.5"/>
+  <circle cx="69" cy="42" r="7.5" fill="#FFF6B8"/>
+  <path d="M69 34.5v15M62.5 38.25l13 7.5M75.5 38.25l-13 7.5" stroke="#E8C21C" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="122" y="66" font-family="Archivo, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-size="52" fill="#12130F">Lalcha</text>
+  <text x="312" y="66" font-family="Archivo, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-size="52" fill="#B3261E">POS</text>
+</svg>

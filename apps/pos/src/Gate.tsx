@@ -3,8 +3,12 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { App } from "./App";
 import { strings, type StringKey } from "./i18n";
 import { remember, saved } from "./prefs";
+import { clearDemoTill } from "./local";
 import { startSync } from "./sync";
-import { getAuth, initAuth, lock, refreshStaff, requestCode, signIn, subscribeAuth, verifyCode, type SignInResult } from "./session";
+import { connectDemo, getAuth, getDemo, initAuth, lock, refreshStaff, requestCode, signIn, siteUrl, subscribeAuth, verifyCode, type DemoInfo, type SignInResult } from "./session";
+
+/** Signup lives on the main website, not on a store's own address. */
+const signupUrl = () => siteUrl("/signup/");
 
 const IDLE_LOCK_MS = 15 * 60_000;
 const fieldClass = "mt-1 h-14 w-full border-[3px] border-line bg-bg px-3 text-xl font-black";
@@ -23,9 +27,9 @@ function useLang() {
 function Shell({ lang, toggle, children, overlay }: { lang: Lang; toggle: () => void; children: React.ReactNode; overlay?: boolean }) {
   return (
     <div className={`no-print flex flex-col bg-bg ${overlay ? "fixed inset-0 z-[60]" : "h-full"}`}>
-      <header className="flex items-center justify-between bg-[#12130f] px-4 py-2.5">
-        <span className="bg-accent px-2 py-0.5 text-lg font-black text-on-accent">Lalcha</span>
-        <button className="min-h-9 border border-white/40 px-3 text-sm font-bold text-[#f6f3e7]" onClick={toggle}>
+      <header className="flex items-center justify-between border-b-[3px] border-line bg-panel px-4 py-2.5">
+        <span className="flex items-center gap-2 text-lg font-black"><img src="/icon.svg" alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
+        <button className="min-h-9 border-2 border-line px-3 text-sm font-bold text-text" onClick={toggle}>
           {lang === "bn" ? "EN" : "বাং"}
         </button>
       </header>
@@ -36,7 +40,9 @@ function Shell({ lang, toggle, children, overlay }: { lang: Lang; toggle: () => 
 
 function PairScreen() {
   const { lang, t, toggle } = useLang();
-  const [phone, setPhone] = useState("");
+  const [byPhone, setByPhone] = useState(false);
+  const [contactValue, setContactValue] = useState("");
+  const contact = byPhone ? { phone: contactValue.trim() } : { email: contactValue.trim().toLowerCase() };
   const [deviceName, setDeviceName] = useState("POS 1");
   const [code, setCode] = useState("");
   const [sent, setSent] = useState(false);
@@ -50,11 +56,11 @@ function PairScreen() {
     setError("");
     try {
       if (!sent) {
-        const res = await requestCode(phone.trim());
+        const res = await requestCode(contact);
         setDevCode(res.devCode ?? null);
         setSent(true);
       } else {
-        const result = await verifyCode(phone.trim(), code.trim(), deviceName.trim() || "POS");
+        const result = await verifyCode(contact, code.trim(), deviceName.trim() || "POS");
         if (result === "bad") setError(t("badCode"));
         if (result === "limit") setError(t("device_limit"));
       }
@@ -76,10 +82,22 @@ function PairScreen() {
       >
         <h1 className="text-3xl font-black">{t("pairTitle")}</h1>
         <p className="font-bold text-muted">{t("pairHelp")}</p>
-        <label className="block font-bold">
-          {t("phone")}
-          <input autoFocus required disabled={sent} inputMode="tel" maxLength={11} value={phone} onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))} placeholder="01XXXXXXXXX" className={fieldClass} />
-        </label>
+        {byPhone ? (
+          <label className="block font-bold">
+            {t("phone")}
+            <input autoFocus required disabled={sent} inputMode="tel" maxLength={11} value={contactValue} onChange={(e) => setContactValue(e.target.value.replace(/\D/g, ""))} placeholder="01XXXXXXXXX" className={fieldClass} />
+          </label>
+        ) : (
+          <label className="block font-bold">
+            {t("email")}
+            <input autoFocus required disabled={sent} type="email" inputMode="email" autoComplete="email" maxLength={254} value={contactValue} onChange={(e) => setContactValue(e.target.value)} placeholder="you@example.com" className={fieldClass} />
+          </label>
+        )}
+        {!sent && (
+          <button type="button" className="min-h-11 font-bold underline" onClick={() => { setByPhone(!byPhone); setContactValue(""); }}>
+            {byPhone ? t("useEmail") : t("usePhone")}
+          </button>
+        )}
         {sent && (
           <>
             <p className="font-bold">{t("codeSent")}</p>
@@ -102,7 +120,7 @@ function PairScreen() {
         <button type="submit" disabled={busy} className="min-h-16 w-full bg-[#12130f] text-xl font-black text-accent ring-2 ring-line disabled:opacity-40">
           {sent ? t("connectDevice") : t("sendCode")}
         </button>
-        {!sent && <a href="/signup" className="flex min-h-11 items-center justify-center font-bold underline">{t("newStoreLink")}</a>}
+        {!sent && <a href={signupUrl()} className="flex min-h-11 items-center justify-center font-bold underline">{t("newStoreLink")}</a>}
         {sent && (
           <button
             type="button"
@@ -122,14 +140,59 @@ function PairScreen() {
   );
 }
 
+/** The demo opens straight onto the till: it connects by itself, and the button is only a retry. */
+function DemoStart() {
+  const { lang, t, toggle } = useLang();
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  const start = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    if (!(await connectDemo().catch(() => false))) setError(t("pairFailed"));
+    setBusy(false);
+  }, [t]);
+  useEffect(() => {
+    void start();
+  }, [start]);
+  return (
+    <Shell lang={lang} toggle={toggle}>
+      <div className="mx-auto mt-6 max-w-md space-y-4 border-[3px] border-line bg-panel p-5">
+        <h1 className="text-3xl font-black">{t("demoTitle")}</h1>
+        <p className="font-bold text-muted">{t("demoHelp")}</p>
+        {error && <p role="alert" className="font-bold text-hot">{error}</p>}
+        <button
+          disabled={busy}
+          className="min-h-16 w-full bg-accent text-xl font-black text-on-accent ring-[3px] ring-line ring-inset disabled:opacity-40"
+          onClick={() => void start()}
+        >
+          {busy ? t("loading") : t("demoStart")}
+        </button>
+        <a href={signupUrl()} className="flex min-h-11 items-center justify-center font-bold underline">{t("demoOwn")}</a>
+      </div>
+    </Shell>
+  );
+}
+
+/** A thin strip over the demo store, so nobody mistakes it for a real shop. */
+function DemoBar() {
+  const { t } = useLang();
+  return (
+    <div className="no-print flex flex-wrap items-center justify-center gap-x-3 bg-accent px-3 py-1 text-sm font-bold text-on-accent">
+      <span>{t("demoBar")}</span>
+      <a href={signupUrl()} className="underline">{t("demoOwn")} →</a>
+    </div>
+  );
+}
+
 const errorKey: Record<Exclude<SignInResult, "ok">, StringKey> = {
   wrong_pin: "wrongPin",
   locked: "pinLocked",
   needs_online: "needsOnline",
 };
 
-function PinScreen({ overlay }: { overlay: boolean }) {
+function PinScreen({ overlay, demo }: { overlay: boolean; demo: DemoInfo | null }) {
   const { lang, t, toggle } = useLang();
+  const demoPin = (id: string) => demo?.staff?.find((s) => s.id === id)?.pin;
   const [staff, setStaff] = useState<StaffMember[] | null>(null);
   const [selected, setSelected] = useState<StaffMember | null>(null);
   const [pin, setPin] = useState("");
@@ -172,7 +235,8 @@ function PinScreen({ overlay }: { overlay: boolean }) {
     <Shell lang={lang} toggle={toggle} overlay={overlay}>
       {!selected ? (
         <div className="mx-auto mt-6 max-w-2xl">
-          <h1 className="mb-4 text-3xl font-black">{t("whoIs")}</h1>
+          <h1 className="mb-4 text-3xl font-black">{demo?.demo ? t("demoWho") : t("whoIs")}</h1>
+          {error && <p role="alert" className="mb-3 font-bold text-hot">{error}</p>}
           {staff === null ? (
             <p className="font-bold text-muted">{t("loading")}</p>
           ) : staff.length === 0 ? (
@@ -183,14 +247,26 @@ function PinScreen({ overlay }: { overlay: boolean }) {
                 <button
                   key={s.id}
                   onClick={() => {
+                    const pinForDemo = demoPin(s.id);
+                    setError("");
+                    if (pinForDemo) {
+                      // The demo signs in with one tap; the PIN is shown so visitors see how it works.
+                      setBusy(true);
+                      void signIn(s, pinForDemo).then((result) => {
+                        setBusy(false);
+                        if (result !== "ok") setError(t(errorKey[result]));
+                      });
+                      return;
+                    }
                     setSelected(s);
                     setPin("");
-                    setError("");
                   }}
+                  disabled={busy}
                   className="tile-press min-h-28 border-[3px] border-line bg-panel p-3 text-left"
                 >
                   <span className="block text-xl font-black">{s.name}</span>
                   <span className="font-bold text-muted">{t(s.role)}</span>
+                  {demoPin(s.id) && <span className="mt-1 block text-sm font-bold">{t("demoPin")}: {demoPin(s.id)}</span>}
                 </button>
               ))}
             </div>
@@ -235,16 +311,37 @@ function PinScreen({ overlay }: { overlay: boolean }) {
 export function Gate() {
   const auth = useSyncExternalStore(subscribeAuth, getAuth);
   const [failed, setFailed] = useState(false);
+  const [demo, setDemo] = useState<DemoInfo | null>(null);
 
   useEffect(() => {
     initAuth().catch(() => setFailed(true));
+    void getDemo().then(setDemo);
   }, []);
 
   useEffect(() => {
-    if (auth.status === "paired") startSync();
-  }, [auth.status]);
+    if (auth.status !== "paired" || !demo) return;
+    void (demo.demo ? clearDemoTill().catch(() => undefined) : Promise.resolve()).then(startSync);
+  }, [auth.status, demo]);
 
-  const active = Boolean(auth.user) && !auth.locked;
+  // The demo signs in as the owner on first load, so visitors see everything. Locking still shows all staff.
+  const [autoSignedIn, setAutoSignedIn] = useState(false);
+  useEffect(() => {
+    const owner = demo?.staff?.find((s) => s.role === "owner");
+    // After an hourly reset the device reconnects, and should sign in again by itself.
+    if (auth.status === "unpaired" && autoSignedIn) setAutoSignedIn(false);
+    if (!demo?.demo || !owner || auth.status !== "paired" || auth.user || autoSignedIn) return;
+    setAutoSignedIn(true);
+    void refreshStaff().then(() => signIn({ id: owner.id, name: owner.name, role: owner.role }, owner.pin));
+  }, [demo, auth.status, auth.user, autoSignedIn]);
+
+  // The demo never locks: if anything locks it, the same person is signed straight back in.
+  useEffect(() => {
+    if (!demo?.demo || !auth.user || !auth.locked) return;
+    const pin = demo.staff?.find((s) => s.id === auth.user?.id)?.pin;
+    if (pin) void signIn({ id: auth.user.id, name: auth.user.name, role: auth.user.role }, pin);
+  }, [demo, auth.user, auth.locked]);
+
+  const active = Boolean(auth.user) && !auth.locked && !demo?.demo;
   useEffect(() => {
     if (!active) return;
     let timer = window.setTimeout(lock, IDLE_LOCK_MS);
@@ -265,13 +362,26 @@ export function Gate() {
     return <div role="alert" className="flex h-full items-center justify-center p-8 text-center text-xl font-bold">{strings[saved<Lang>("lang", "bn")].dbError}</div>;
   }
   if (auth.status === "loading") return null;
-  if (auth.status === "unpaired") return <PairScreen />;
-  if (!auth.user) return <PinScreen overlay={false} />;
-  // The till stays mounted under the lock screen, so a bill in progress survives switching staff.
+  if (auth.status === "unpaired") {
+    if (!demo) return null;
+    return demo.demo ? <DemoStart /> : <PairScreen />;
+  }
+  if (!demo?.demo) {
+    if (!auth.user) return <PinScreen overlay={false} demo={demo} />;
+    // The till stays mounted under the lock screen, so a bill in progress survives switching staff.
+    return (
+      <>
+        <App user={auth.user} />
+        {auth.locked && <PinScreen overlay demo={demo} />}
+      </>
+    );
+  }
   return (
-    <>
-      <App user={auth.user} />
-      {auth.locked && <PinScreen overlay />}
-    </>
+    <div className="flex h-full flex-col">
+      <DemoBar />
+      <div className="relative min-h-0 flex-1">
+        {auth.user ? <App user={auth.user} demo /> : <p className="p-8 text-center text-xl font-bold text-muted">{strings[saved<Lang>("lang", "bn")].loading}</p>}
+      </div>
+    </div>
   );
 }

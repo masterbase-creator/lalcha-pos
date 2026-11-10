@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type CatalogProduct, type CatalogResponse, type CustomerSummary, type Role, type Sale, type StaffMember, type StoreSettings, type SubscriptionInfo, type Unit, type OpKind, type RecentSale, type ReportResponse, type SyncResult, lineAmount, QTY_SCALE } from "@lalcha/domain";
+import { DEFAULT_SETTINGS, type CatalogProduct, type CatalogResponse, type CustomerSummary, type Role, type Sale, type StaffMember, type StoreSettings, type SubscriptionInfo, type Unit, type OpKind, type Pack, type RecentSale, type ReportResponse, type SyncResult, computeBill, lineAmount, QTY_SCALE } from "@lalcha/domain";
 import { v7 as uuidv7 } from "uuid";
 import type { Statement } from "./db.worker";
 
@@ -34,7 +34,8 @@ export async function loadProducts(): Promise<CatalogProduct[]> {
   const sold = new Map<string, number>();
   for (const { payload } of pending) {
     for (const l of (JSON.parse(payload as string) as Sale).lines) {
-      sold.set(l.productId, (sold.get(l.productId) ?? 0) + l.qty);
+      // A dozen sold takes twelve pieces from stock.
+      sold.set(l.productId, (sold.get(l.productId) ?? 0) + Math.round((l.qty * (l.packQty ?? QTY_SCALE)) / QTY_SCALE));
     }
   }
   return rows.map((r) => ({
@@ -47,6 +48,10 @@ export async function loadProducts(): Promise<CatalogProduct[]> {
     pricePoisha: r.price_poisha as number,
     imageUrl: r.image_url as string | null,
     unit: r.unit as Unit,
+    vatRateBp: r.vat_rate_bp as number | null,
+    variantOf: (r.variant_of as string | null) ?? null,
+    variantName: (r.variant_name as string | null) ?? null,
+    packs: JSON.parse((r.packs as string | null) ?? "[]") as Pack[],
     stock: (r.stock as number) - (sold.get(r.id as string) ?? 0),
   }));
 }
@@ -55,10 +60,11 @@ export async function saveCatalog(catalog: CatalogResponse) {
   await run([
     { sql: "DELETE FROM products" },
     ...catalog.products.map((p) => ({
-      sql: "INSERT INTO products (id, sku, barcode, name_en, name_bn, category, price_poisha, image_url, stock, unit) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      bind: [p.id, p.sku, p.barcode, p.nameEn, p.nameBn, p.category, p.pricePoisha, p.imageUrl, p.stock, p.unit],
+      sql: "INSERT INTO products (id, sku, barcode, name_en, name_bn, category, price_poisha, image_url, stock, unit, vat_rate_bp, variant_of, variant_name, packs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      bind: [p.id, p.sku, p.barcode, p.nameEn, p.nameBn, p.category, p.pricePoisha, p.imageUrl, p.stock, p.unit, p.vatRateBp, p.variantOf ?? null, p.variantName ?? null, JSON.stringify(p.packs ?? [])],
     })),
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('store_name', ?)", bind: [catalog.store.name] },
+    { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('branch', ?)", bind: [catalog.branch?.name ?? ""] },
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('settings', ?)", bind: [JSON.stringify(catalog.settings)] },
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('subscription', ?)", bind: [JSON.stringify(catalog.subscription)] },
   ]);
@@ -214,6 +220,15 @@ export async function addLocalCustomer(c: CustomerSummary, actorId: string) {
   ]);
 }
 
+export async function updateLocalCustomer(c: CustomerSummary, actorId: string, opId: string) {
+  await run([
+    { sql: "UPDATE customers SET name = ?, phone = ?, address = ?, credit_limit_poisha = ? WHERE id = ?", bind: [c.name, c.phone, c.address, c.creditLimitPoisha, c.id] },
+    { sql: "INSERT OR IGNORE INTO outbox (id, kind, actor_id, payload, created_at) VALUES (?,?,?,?,?)", bind: [opId, "customer_update", actorId, JSON.stringify({ id: c.id, name: c.name, phone: c.phone, address: c.address, creditLimitPoisha: c.creditLimitPoisha }), new Date().toISOString()] },
+  ]);
+}
+
+export const loadBranchName = async () => (await getMeta("branch")) ?? "";
+
 export async function nextOps(kinds: OpKind[], limit: number) {
   const [rows] = await run([
     { sql: `SELECT id, kind, actor_id, payload FROM outbox WHERE status = 'pending' AND kind IN (${kinds.map(() => "?").join(",")}) ORDER BY created_at LIMIT ?`, bind: [...kinds, limit] },
@@ -248,7 +263,7 @@ export async function loadLocalSales(): Promise<LocalSale[]> {
     all.set(s.id, {
       id: s.id, receiptNo: s.receiptNo, soldAt: s.soldAt, totalPoisha: s.totalPoisha, tenderedPoisha: s.tenderedPoisha, discountPoisha: s.discountPoisha, vatPoisha: s.vatPoisha ?? 0,
       paymentMethod: s.paymentMethod, bakiPaidMethod: s.bakiPaidMethod ?? "cash", customerId: s.customerId, cashierName: null, returnedPoisha: 0, creditedPoisha: 0,
-      lines: s.lines.map((l, i) => ({ lineNo: i + 1, productId: l.productId, name: l.name, qty: l.qty, unitPricePoisha: l.unitPricePoisha, unit: l.unit ?? "pc", returnedQty: 0 })),
+      lines: s.lines.map((l, i) => ({ lineNo: i + 1, productId: l.productId, name: l.name, qty: l.qty, unitPricePoisha: l.unitPricePoisha, unit: l.unit ?? "pc", returnedQty: 0, finalPoisha: computeBill(s.lines, s.discountPoisha, s.vatInclusive ?? true).lines[i].finalPoisha })),
     });
   }
   for (const r of recent) {
@@ -340,6 +355,17 @@ export async function expectedCash(shift: LocalShift) {
     if (r.kind === "sale_return" && p.refundMethod === "cash") cash -= (p.valuePoisha ?? 0) - (p.creditPoisha ?? 0);
   }
   return cash;
+}
+
+/** The demo starts every visit as a fresh shop: what the last visit did on this device is forgotten. */
+export async function clearDemoTill() {
+  await run([
+    { sql: "DELETE FROM sale_queue" },
+    { sql: "DELETE FROM outbox" },
+    { sql: "DELETE FROM recent_sales" },
+    { sql: "DELETE FROM customers" },
+    { sql: "DELETE FROM meta WHERE k IN ('recent_since', 'receipt_seq', 'shift')" },
+  ]);
 }
 
 export async function queueCounts() {

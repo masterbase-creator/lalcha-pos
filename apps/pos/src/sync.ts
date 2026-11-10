@@ -85,7 +85,7 @@ export function syncNow() {
     }
     try {
       // Customers go first and returns last, because sales and returns refer to them in that order.
-      await pushOps(["customer_create"]);
+      await pushOps(["customer_create", "customer_update"]);
       await pushSales();
       await pushOps(["customer_payment", "sale_return", "shift_open", "shift_close"]);
       await pullCatalog();

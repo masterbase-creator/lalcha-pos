@@ -1,12 +1,15 @@
-import { CATEGORIES, formatQty, formatTaka, QTY_SCALE, UNITS, unitLabel, type CatalogProduct, type Unit, type Lang, type ProductDetails } from "@lalcha/domain";
+import { CATEGORIES, formatQty, formatTaka, QTY_SCALE, UNIT_NAMES, UNITS, unitLabel, type CatalogProduct, type Pack, type Unit, type Lang, type ProductDetails } from "@lalcha/domain";
+import { v7 as uuidv7 } from "uuid";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StringKey } from "./i18n";
 import { prepareProductImage } from "./image";
 import { name, ProductImage } from "./ProductImage";
+import { ImportDialog } from "./ImportDialog";
 import { apiFetch } from "./session";
 
 type T = (k: StringKey) => string;
-type Editing = { product: CatalogProduct | null };
+/** "variantOf" starts a new product as a variant of an existing one, copying its details. */
+type Editing = { product: CatalogProduct | null; variantOf?: CatalogProduct };
 
 export function ProductsScreen({
   products,
@@ -23,6 +26,7 @@ export function ProductsScreen({
 }) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [importing, setImporting] = useState(false);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -45,6 +49,9 @@ export function ProductsScreen({
           className="min-h-13 shrink-0 bg-accent px-4 text-lg font-black text-on-accent ring-[3px] ring-line ring-inset disabled:opacity-40"
         >
           + {t("addProduct")}
+        </button>
+        <button disabled={!online} data-testid="open-import" onClick={() => setImporting(true)} className="min-h-13 shrink-0 border-[3px] border-line bg-panel px-3 font-black disabled:opacity-40">
+          {t("importProducts")}
         </button>
       </div>
       {!online && <p role="alert" className="px-3 pb-2 font-bold text-hot">{t("needOnline")}</p>}
@@ -74,10 +81,14 @@ export function ProductsScreen({
         ))}
       </ul>
 
+      {importing && <ImportDialog lang={lang} t={t} onClose={() => setImporting(false)} onDone={onChanged} />}
       {editing && (
         <ProductForm
-          key={editing.product?.id ?? "new"}
+          key={editing.product?.id ?? `new-${editing.variantOf?.id ?? ""}`}
           product={editing.product}
+          variantOf={editing.variantOf ?? null}
+          mains={products.filter((p) => !p.variantOf)}
+          onAddVariant={(main) => setEditing({ product: null, variantOf: main })}
           lang={lang}
           t={t}
           onClose={() => setEditing(null)}
@@ -92,14 +103,23 @@ const taka = (poisha: number) => String(poisha / 100);
 const toPoisha = (text: string) => (text.trim() === "" ? NaN : Math.round(Number(text) * 100));
 const fieldClass = "mt-1 h-12 w-full border-[3px] border-line bg-bg px-3 text-lg font-bold";
 
+type PackRow = { id: string; name: string; qty: string; price: string; barcode: string };
+
 function ProductForm({
   product,
+  variantOf: startAsVariantOf,
+  mains,
+  onAddVariant,
   lang,
   t,
   onClose,
   onChanged,
 }: {
   product: CatalogProduct | null;
+  variantOf: CatalogProduct | null;
+  /** Products that can have variants: the ones that aren't variants themselves. */
+  mains: CatalogProduct[];
+  onAddVariant: (main: CatalogProduct) => void;
   lang: Lang;
   t: T;
   onClose: () => void;
@@ -107,11 +127,18 @@ function ProductForm({
 }) {
   // Set once a new product is saved, so a retry after a failed photo edits it rather than duplicating it.
   const [savedId, setSavedId] = useState(product?.id ?? null);
-  const [nameBn, setNameBn] = useState(product?.nameBn ?? "");
-  const [nameEn, setNameEn] = useState(product?.nameEn ?? "");
-  const [category, setCategory] = useState<string>(product?.category ?? CATEGORIES[0]);
-  const [unit, setUnit] = useState<Unit>(product?.unit ?? "pc");
-  const [price, setPrice] = useState(product ? taka(product.pricePoisha) : "");
+  const base = product ?? startAsVariantOf;
+  const plain = (p: CatalogProduct | null | undefined, k: "nameEn" | "nameBn") => (p ? ((p as { plainEn?: string; plainBn?: string })[k === "nameEn" ? "plainEn" : "plainBn"] ?? p[k]) : "");
+  const [nameBn, setNameBn] = useState(plain(base, "nameBn"));
+  const [nameEn, setNameEn] = useState(plain(base, "nameEn"));
+  const [category, setCategory] = useState<string>(base?.category ?? CATEGORIES[0]);
+  // A new product must have its unit chosen on purpose: kg, feet and pieces are sold very differently.
+  const [unit, setUnit] = useState<Unit | "">(base?.unit ?? "");
+  const [vat, setVat] = useState(base?.vatRateBp != null ? String(base.vatRateBp / 100) : "");
+  const [price, setPrice] = useState(base ? taka(base.pricePoisha) : "");
+  const [variantOf, setVariantOf] = useState<string>(startAsVariantOf ? (startAsVariantOf.variantOf ?? startAsVariantOf.id) : (product?.variantOf ?? ""));
+  const [variantName, setVariantName] = useState(product?.variantName ?? "");
+  const [packs, setPacks] = useState<PackRow[]>([]);
   const [cost, setCost] = useState("");
   const [barcode, setBarcode] = useState(product?.barcode ?? "");
   const [stock, setStock] = useState("");
@@ -133,6 +160,9 @@ function ProductForm({
         const details = (await res.json()) as ProductDetails;
         if (cancelled) return;
         setCost(taka(details.costPoisha));
+        setVariantOf(details.variantOf ?? "");
+        setVariantName(details.variantName ?? "");
+        setPacks((details.packs ?? []).map((p) => ({ id: p.id, name: p.name, qty: String(p.qty / QTY_SCALE), price: taka(p.pricePoisha), barcode: p.barcode ?? "" })));
         setLoaded(true);
       } catch {
         if (!cancelled) setError(t("saveFailed"));
@@ -171,7 +201,7 @@ function ProductForm({
   async function errorMessage(res: Response) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     const code = body?.error as StringKey | undefined;
-    return code && ["name_required", "duplicate_barcode", "duplicate_sku", "invalid_image", "image_too_large"].includes(code)
+    return code && ["name_required", "duplicate_barcode", "duplicate_sku", "invalid_image", "image_too_large", "unit_required", "variant_name_required", "pack_name_required", "has_variants"].includes(code)
       ? t(code)
       : t("saveFailed");
   }
@@ -185,10 +215,28 @@ function ProductForm({
       setError(t("badNumber"));
       return;
     }
+    if (!unit) {
+      setError(t("unit_required"));
+      return;
+    }
+    if (variantOf && !variantName.trim()) {
+      setError(t("variant_name_required"));
+      return;
+    }
+    const packList: Pack[] = packs
+      .filter((p) => p.name.trim() || p.qty.trim() || p.price.trim())
+      .map((p) => ({ id: p.id, name: p.name.trim(), qty: Math.round(Number(p.qty) * QTY_SCALE), pricePoisha: toPoisha(p.price), barcode: p.barcode.trim() || null }));
+    if (packList.some((p) => !p.name || !(p.qty > 0) || !Number.isFinite(p.pricePoisha) || p.pricePoisha < 0)) {
+      setError(t("packIncomplete"));
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      const fields = { nameBn, nameEn, category, pricePoisha, costPoisha, barcode: barcode.trim() || null, unit };
+      const fields = {
+        nameBn, nameEn, category, pricePoisha, costPoisha, barcode: barcode.trim() || null, unit, vatRateBp: vat.trim() === "" ? null : Math.round(Number(vat) * 100),
+        variantOf: variantOf || null, variantName: variantName.trim() || null, packs: packList,
+      };
       let id = savedId;
       const res = id
         ? await apiFetch(`/v1/products/${id}`, {
@@ -247,7 +295,8 @@ function ProductForm({
     }
   }
 
-  const existingImage = preview ? null : product?.imageUrl;
+  const existingImage = preview ? null : base?.imageUrl;
+  const unitShort = unit ? unitLabel(unit, lang) || t("pcShort") : "";
 
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/60 sm:items-center" role="dialog" aria-modal="true" aria-label={product ? t("editProduct") : t("addProduct")}>
@@ -258,7 +307,7 @@ function ProductForm({
           void save();
         }}
       >
-        <h2 className="text-2xl font-black">{product ? t("editProduct") : t("addProduct")}</h2>
+        <h2 className="text-2xl font-black">{product ? t("editProduct") : startAsVariantOf ? t("addVariant") : t("addProduct")}</h2>
 
         <div className="flex items-center gap-3">
           <div className="flex h-28 w-28 shrink-0 items-center justify-center border-[3px] border-line bg-tile">
@@ -310,10 +359,15 @@ function ProductForm({
             </select>
           </label>
           <label className="block font-bold">
-            {t("sellBy")}
-            <select aria-label={t("sellBy")} value={unit} onChange={(e) => setUnit(e.target.value as Unit)} className={fieldClass}>
+            {t("productVat")}
+            <input inputMode="decimal" value={vat} onChange={(e) => setVat(e.target.value.replace(/[^0-9.]/g, ""))} placeholder={t("useStoreRate")} className={fieldClass} />
+          </label>
+          <label className="block font-bold">
+            {t("sellBy")} *
+            <select required aria-label={t("sellBy")} value={unit} onChange={(e) => setUnit(e.target.value as Unit)} className={`${fieldClass} ${unit ? "" : "border-hot"}`}>
+              <option value="" disabled>{t("chooseUnit")}</option>
               {UNITS.map((u) => (
-                <option key={u} value={u}>{u === "pc" ? t("byPiece") : unitLabel(u, lang)}</option>
+                <option key={u} value={u}>{UNIT_NAMES[u][lang]}</option>
               ))}
             </select>
           </label>
@@ -331,8 +385,55 @@ function ProductForm({
           </label>
         </div>
 
+        <fieldset className="space-y-2 border-[3px] border-line p-3">
+          <legend className="px-1 text-lg font-black">{t("variant")}</legend>
+          <p className="text-sm font-bold text-muted">{t("variantHelp")}</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block font-bold">
+              {t("variantOf")}
+              <select value={variantOf} onChange={(e) => setVariantOf(e.target.value)} className={fieldClass}>
+                <option value="">{t("notAVariant")}</option>
+                {mains.filter((m) => m.id !== savedId).map((m) => (
+                  <option key={m.id} value={m.id}>{lang === "bn" ? m.nameBn : m.nameEn}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block font-bold">
+              {t("variantName")}
+              <input maxLength={60} value={variantName} onChange={(e) => setVariantName(e.target.value)} placeholder={t("variantPlaceholder")} className={fieldClass} />
+            </label>
+          </div>
+          {product && !product.variantOf && (
+            <button type="button" className="min-h-11 w-full border-[3px] border-line font-black" onClick={() => onAddVariant(product)}>
+              + {t("addVariant")}
+            </button>
+          )}
+        </fieldset>
+
+        <fieldset className="space-y-2 border-[3px] border-line p-3">
+          <legend className="px-1 text-lg font-black">{t("packs")}</legend>
+          <p className="text-sm font-bold text-muted">{t("packsHelp")}</p>
+          {packs.map((p, i) => {
+            const set = (patch: Partial<PackRow>) => setPacks((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+            return (
+              <div key={p.id} className="grid grid-cols-2 gap-2 border-b-2 border-line/20 pb-2 sm:grid-cols-[1.3fr_1fr_1fr_auto]">
+                <label className="block text-sm font-bold">{t("packName")}<input maxLength={40} value={p.name} onChange={(e) => set({ name: e.target.value })} placeholder={t("packPlaceholder")} className={fieldClass} /></label>
+                <label className="block text-sm font-bold">{t("packContains")} ({unitShort}){<input inputMode="decimal" value={p.qty} onChange={(e) => set({ qty: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="12" className={fieldClass} />}</label>
+                <label className="block text-sm font-bold">{t("price")}<input inputMode="decimal" value={p.price} onChange={(e) => set({ price: e.target.value.replace(/[^0-9.]/g, "") })} className={fieldClass} /></label>
+                <button type="button" aria-label={t("remove")} className="mt-6 min-h-12 border-[3px] border-line px-3 font-black" onClick={() => setPacks((list) => list.filter((_, j) => j !== i))}>✕</button>
+                <label className="col-span-2 block text-sm font-bold sm:col-span-4">{t("barcode")}<input maxLength={64} value={p.barcode} onChange={(e) => set({ barcode: e.target.value })} onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }} className={fieldClass} /></label>
+              </div>
+            );
+          })}
+          {packs.length < 10 && (
+            <button type="button" disabled={!unit} className="min-h-11 w-full border-[3px] border-dashed border-line font-black disabled:opacity-40" onClick={() => setPacks((list) => [...list, { id: uuidv7(), name: "", qty: "", price: "", barcode: "" }])}>
+              + {t("addPack")}
+            </button>
+          )}
+        </fieldset>
+
         <label className="block font-bold">
-          {savedId ? `${t("adjustStock")} · ${t("currentStock")}: ${formatQty(product?.stock ?? 0, unit, lang)}` : t("openingStock")}
+          {savedId ? `${t("adjustStock")} · ${t("currentStock")}: ${formatQty(product?.stock ?? 0, unit || "pc", lang)}` : t("openingStock")}{unitShort ? ` (${unitShort})` : ""}
           <input inputMode="decimal" value={stock} onChange={(e) => setStock(e.target.value.replace(/[^0-9.-]/g, ""))} placeholder="0" className={fieldClass} />
         </label>
 

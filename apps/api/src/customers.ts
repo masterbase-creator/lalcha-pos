@@ -6,7 +6,6 @@ import {
   shiftOpenSchema,
   syncOpsSchema,
   type RecentSale,
-  lineAmount,
   returnCreateSchema,
   returnValue,
   supplierPaymentSchema,
@@ -15,13 +14,14 @@ import {
   type ReturnResult,
   type SaleDetail,
   type SaleListItem,
+  type Unit,
 } from "@lalcha/domain";
 import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Hono } from "hono";
 import { managers, requireDevice, staffOnly } from "./auth.ts";
-import { pgCode, withStore, type Env, type Tx } from "./db.ts";
-import { ApiError, guarded, idParam, parse } from "./http.ts";
+import { audit, pgCode, withStore, type Env, type Tx } from "./db.ts";
+import { ApiError, guarded, idParam, PAGE_SIZE, pageOf, parse } from "./http.ts";
 import { customerPayments, customers, products, saleLines, saleReturnLines, saleReturns, sales, shifts, stockLedger, users } from "./schema.ts";
 
 /** A customer's baki is always: unpaid sales, minus collections, minus returns credited to it. */
@@ -42,6 +42,8 @@ export async function customerDues(tx: Tx, storeId: string, customerId?: string)
 
 const oneCustomer = (storeId: string, id: string) => and(eq(customers.storeId, storeId), eq(customers.id, id));
 const RECENT_DAYS = 45;
+/** A pack line (a dozen, a sack) is counted in whole packs, whatever the product's own unit is. */
+const lineUnit = sql<Unit>`case when ${saleLines.packName} is null then ${products.unit} else 'pc' end`;
 
 function duplicatePhone(e: unknown): never {
   if (pgCode(e) === "23505") throw new ApiError("duplicate_phone", 409);
@@ -72,12 +74,11 @@ export async function runSaleReturn(tx: Tx, storeId: string, actorId: string, sa
           .where(and(eq(saleReturns.storeId, storeId), eq(saleReturns.saleId, saleId)));
 
         const back = new Map(earlier.map((r) => [r.lineNo, r.qty]));
-        const subtotal = lines.reduce((sum, l) => sum + lineAmount(l.qty, l.unitPricePoisha), 0);
         const planned = input.lines.map((request) => {
           const line = lines.find((l) => l.lineNo === request.lineNo);
           if (!line) throw new ApiError("unknown_reference");
           if (request.qty > line.qty - (back.get(line.lineNo) ?? 0)) throw new ApiError("exceeds_sold");
-          return { request, line, value: returnValue(request.qty, line.unitPricePoisha, subtotal, sale.totalPoisha) };
+          return { request, line, value: returnValue(request.qty, line.qty, line.finalPoisha) };
         });
 
         const remaining = sale.totalPoisha - priorValue;
@@ -126,9 +127,10 @@ export async function runSaleReturn(tx: Tx, storeId: string, actorId: string, sa
         const restock = planned.filter((p) => p.request.restock);
         if (restock.length) {
           await tx.insert(stockLedger).values(
-            restock.map((p) => ({ storeId: storeId, productId: p.line.productId, qtyDelta: p.request.qty, reason: "return" as const, refId: input.id, actorId: actorId })),
+            restock.map((p) => ({ storeId: storeId, branchId: sale.branchId, productId: p.line.productId, qtyDelta: Math.round((p.request.qty * p.line.packQty) / 1000), reason: "return" as const, refId: input.id, actorId: actorId })),
           );
         }
+        await audit(tx, storeId, actorId, "sale_return", saleId, { valuePoisha: value, receiptNo: sale.receiptNo });
         return { valuePoisha: value, creditPoisha: credit, refundPoisha: refund };
 }
 
@@ -145,6 +147,7 @@ async function collect(tx: Tx, storeId: string, actorId: string, customerId: str
   // Money already taken during an outage is recorded, even if another till collected too.
   if (!allowOver && input.amountPoisha > (dues.get(customerId) ?? 0)) throw new ApiError("exceeds_due");
   await tx.insert(customerPayments).values({ storeId, id: input.id, customerId, amountPoisha: input.amountPoisha, method: input.method, ref: input.ref, createdBy: actorId });
+  await audit(tx, storeId, actorId, "baki_collect", customerId, { amountPoisha: input.amountPoisha, method: input.method });
 }
 
 export function registerCustomers(app: Hono<Env>) {
@@ -173,12 +176,10 @@ export function registerCustomers(app: Hono<Env>) {
     guarded(async (c) => {
       const store = c.get("store");
       const input = await parse(c, customerInputSchema);
-      await withStore(store.id, (tx) =>
-        tx
-          .insert(customers)
-          .values({ storeId: store.id, ...input })
-          .onConflictDoNothing({ target: [customers.storeId, customers.id] }),
-      ).catch(duplicatePhone);
+      await withStore(store.id, async (tx) => {
+        await tx.insert(customers).values({ storeId: store.id, ...input }).onConflictDoNothing({ target: [customers.storeId, customers.id] });
+        await audit(tx, store.id, c.get("user").id, "customer_create", input.id, { name: input.name });
+      }).catch(duplicatePhone);
       return c.json({ id: input.id }, 201);
     }),
   );
@@ -190,9 +191,10 @@ export function registerCustomers(app: Hono<Env>) {
       const store = c.get("store");
       const id = idParam(c);
       const { name, phone, address, creditLimitPoisha } = await parse(c, customerInputSchema);
-      const rows = await withStore(store.id, (tx) =>
-        tx.update(customers).set({ name, phone, address, creditLimitPoisha }).where(oneCustomer(store.id, id)).returning({ id: customers.id }),
-      ).catch(duplicatePhone);
+      const rows = await withStore(store.id, async (tx) => {
+        await audit(tx, store.id, c.get("user").id, "customer_update", id, { name, creditLimitPoisha });
+        return tx.update(customers).set({ name, phone, address, creditLimitPoisha }).where(oneCustomer(store.id, id)).returning({ id: customers.id });
+      }).catch(duplicatePhone);
       if (!rows.length) throw new ApiError("not_found", 404);
       return c.json({ ok: true });
     }),
@@ -216,17 +218,20 @@ export function registerCustomers(app: Hono<Env>) {
           .from(sales)
           .where(and(eq(sales.storeId, store.id), eq(sales.customerId, id), eq(sales.paymentMethod, "baki")))
           .orderBy(desc(sales.soldAt))
-          .limit(100);
+          .limit(PAGE_SIZE)
+          .offset(pageOf(c).offset);
         const payments = await tx
           .select({ id: customerPayments.id, amountPoisha: customerPayments.amountPoisha, method: customerPayments.method, ref: customerPayments.ref, paidAt: customerPayments.paidAt })
           .from(customerPayments)
           .where(and(eq(customerPayments.storeId, store.id), eq(customerPayments.customerId, id)))
           .orderBy(desc(customerPayments.paidAt))
-          .limit(100);
+          .limit(PAGE_SIZE + 1)
+          .offset(pageOf(c).offset);
         return {
           customer: { ...customer, duePoisha: dues.get(id) ?? 0 },
           sales: saleRows.map((s) => ({ ...s, soldAt: s.soldAt.toISOString() })),
-          payments: payments.map((p) => ({ ...p, paidAt: p.paidAt.toISOString() })),
+          payments: payments.slice(0, PAGE_SIZE).map((p) => ({ ...p, paidAt: p.paidAt.toISOString() })),
+          hasMore: payments.length > PAGE_SIZE || saleRows.length === PAGE_SIZE,
         };
       });
       return c.json(detail);
@@ -257,6 +262,7 @@ export function registerCustomers(app: Hono<Env>) {
         const dues = await customerDues(tx, store.id, id);
         if ((dues.get(id) ?? 0) !== 0) throw new ApiError("customer_has_due", 409);
         await tx.update(customers).set({ archivedAt: new Date(), phone: null }).where(oneCustomer(store.id, id));
+        await audit(tx, store.id, c.get("user").id, "customer_remove", id);
       });
       return c.json({ ok: true });
     }),
@@ -281,6 +287,18 @@ export function registerCustomers(app: Hono<Env>) {
                 : [];
               // Two tills may add the same phone offline. Keep the customer so their baki isn't lost.
               await tx.insert(customers).values({ storeId: store.id, ...input, phone: taken.some((r) => r.id !== input.id) ? null : input.phone }).onConflictDoNothing({ target: [customers.storeId, customers.id] });
+              await audit(tx, store.id, op.actorId, "customer_create", input.id, { name: input.name });
+            } else if (op.kind === "customer_update") {
+              const input = customerInputSchema.parse(op.payload);
+              const taken = input.phone
+                ? await tx.select({ id: customers.id }).from(customers).where(and(eq(customers.storeId, store.id), eq(customers.phone, input.phone)))
+                : [];
+              // A phone number another customer already uses is skipped, so the rest of the edit still applies.
+              await tx
+                .update(customers)
+                .set({ name: input.name, address: input.address, creditLimitPoisha: input.creditLimitPoisha, ...(taken.some((r) => r.id !== input.id) ? {} : { phone: input.phone }) })
+                .where(oneCustomer(store.id, input.id));
+              await audit(tx, store.id, op.actorId, "customer_update", input.id, { name: input.name });
             } else if (op.kind === "customer_payment") {
               const input = opPaymentSchema.parse(op.payload);
               await collect(tx, store.id, op.actorId, input.customerId, input, true);
@@ -291,12 +309,14 @@ export function registerCustomers(app: Hono<Env>) {
             } else if (op.kind === "shift_open") {
               const input = shiftOpenSchema.parse(op.payload);
               await tx.insert(shifts).values({ storeId: store.id, id: input.id, openedBy: op.actorId, openedAt: new Date(input.openedAt), floatPoisha: input.floatPoisha }).onConflictDoNothing({ target: [shifts.storeId, shifts.id] });
+              await audit(tx, store.id, op.actorId, "shift_open", input.id, { floatPoisha: input.floatPoisha });
             } else {
               const input = shiftCloseSchema.parse(op.payload);
               await tx
                 .update(shifts)
                 .set({ closedBy: op.actorId, closedAt: new Date(input.closedAt), expectedPoisha: input.expectedPoisha, countedPoisha: input.countedPoisha })
                 .where(and(eq(shifts.storeId, store.id), eq(shifts.id, input.id)));
+              await audit(tx, store.id, op.actorId, "shift_close", input.id, { expectedPoisha: input.expectedPoisha, countedPoisha: input.countedPoisha });
             }
           });
           results.push({ id: op.id, status: "accepted" });
@@ -336,7 +356,7 @@ export function registerCustomers(app: Hono<Env>) {
         if (!rows.length) return [];
         const ids = rows.map((r) => r.id);
         const lines = await tx
-          .select({ saleId: saleLines.saleId, lineNo: saleLines.lineNo, productId: saleLines.productId, name: saleLines.name, qty: saleLines.qty, unitPricePoisha: saleLines.unitPricePoisha, unit: products.unit })
+          .select({ saleId: saleLines.saleId, lineNo: saleLines.lineNo, productId: saleLines.productId, name: saleLines.name, qty: saleLines.qty, unitPricePoisha: saleLines.unitPricePoisha, finalPoisha: saleLines.finalPoisha, unit: lineUnit })
           .from(saleLines)
           .innerJoin(products, and(eq(products.storeId, saleLines.storeId), eq(products.id, saleLines.productId)))
           .where(and(eq(saleLines.storeId, store.id), inArray(saleLines.saleId, ids)))
@@ -404,8 +424,8 @@ export function registerCustomers(app: Hono<Env>) {
         if (!sale) throw new ApiError("not_found", 404);
         const lines = await tx
           .select({
-            lineNo: saleLines.lineNo, productId: saleLines.productId, name: saleLines.name, qty: saleLines.qty, unitPricePoisha: saleLines.unitPricePoisha,
-            imageUrl: products.imageUrl, nameEn: products.nameEn, nameBn: products.nameBn, unit: products.unit,
+            lineNo: saleLines.lineNo, productId: saleLines.productId, name: saleLines.name, qty: saleLines.qty, unitPricePoisha: saleLines.unitPricePoisha, finalPoisha: saleLines.finalPoisha,
+            imageUrl: products.imageUrl, nameEn: products.nameEn, nameBn: products.nameBn, unit: lineUnit,
           })
           .from(saleLines)
           .innerJoin(products, and(eq(products.storeId, saleLines.storeId), eq(products.id, saleLines.productId)))

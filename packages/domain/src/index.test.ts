@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { computeTotals, formatQty, formatTaka, lineAmount, vatInTotal, pinSchema, productCreateSchema, purchaseCreateSchema, returnValue, saleSchema, subdomainSchema, subscriptionState } from "./index.ts";
+import { computeBill, parseScaleBarcode, computeTotals, formatQty, formatTaka, lineAmount, vatInTotal, pinSchema, productCreateSchema, purchaseCreateSchema, returnValue, saleSchema, subdomainSchema, subscriptionState } from "./index.ts";
 
 test("purchase payments stay within the total", () => {
   const id = "0190a5e0-7b1c-7000-8000-000000000001";
@@ -10,7 +10,7 @@ test("purchase payments stay within the total", () => {
   };
   assert.equal(purchaseCreateSchema.safeParse(p).success, true);
   assert.equal(purchaseCreateSchema.safeParse({ ...p, paidPoisha: 1901 }).success, false);
-  assert.equal(purchaseCreateSchema.safeParse({ ...p, receiveNow: false }).success, false);
+  assert.equal(purchaseCreateSchema.safeParse({ ...p, receiveNow: false, paymentMethod: "cash" }).success, true);
   assert.equal(purchaseCreateSchema.safeParse({ ...p, paymentMethod: "bkash" }).success, false);
 });
 
@@ -33,6 +33,16 @@ test("loose quantities price and print correctly", () => {
   assert.equal(formatQty(2000, "pc", "en"), "2");
 });
 test("VAT comes out of an inclusive total", () => assert.equal(vatInTotal(11500, 1500), 1500));
+
+test("VAT can be added on top, per line, after the discount", () => {
+  const bill = computeBill([{ qty: 1000, unitPricePoisha: 10000, vatRateBp: 1500 }, { qty: 1000, unitPricePoisha: 10000, vatRateBp: 0 }], 2000, false);
+  assert.deepEqual([bill.vatPoisha, bill.totalPoisha, bill.lines[0].finalPoisha], [1350, 19350, 10350]);
+});
+test("reads a scale label and refuses a bad check digit", () => {
+  assert.deepEqual(parseScaleBarcode("2112345012506", "21"), { itemCode: "12345", value: 1250 });
+  assert.equal(parseScaleBarcode("2112345012507", "21"), null);
+  assert.equal(parseScaleBarcode("2212345012503", "21"), null);
+});
 
 test("easy PINs are refused", () => {
   for (const pin of ["1111", "1234", "9876", "123", "1234567", "12a4"]) assert.equal(pinSchema.safeParse(pin).success, false, pin);
@@ -67,7 +77,7 @@ test("baki needs a customer and can be part-paid", () => {
   assert.equal(saleSchema.safeParse({ ...b, customerId, tenderedPoisha: 999999 }).success, false);
 });
 
-test("returns share the bill discount", () => assert.equal(returnValue(1000, 1000, 2000, 1500), 750));
+test("returns share the bill discount", () => assert.equal(returnValue(1000, 2000, 1500), 750));
 
 test("totals apply and cap the discount", () => {
   assert.equal(computeTotals(base.lines, 2000).totalPoisha, 80000);

@@ -2,7 +2,7 @@ import { formatTaka, SUPPLIER_PAYMENT_METHODS, type CustomerDetail, type Custome
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 import type { StringKey } from "./i18n";
-import { addLocalCustomer, enqueueOp } from "./local";
+import { addLocalCustomer, enqueueOp, updateLocalCustomer } from "./local";
 import { apiFetch, getAuth } from "./session";
 
 type T = (k: StringKey) => string;
@@ -103,22 +103,14 @@ function CustomerForm({ customer, t, online, canRemove, onClose, onSaved }: { cu
     setBusy(true);
     setError("");
     try {
-      if (!customer) {
-        if (phone && !/^01[3-9]\d{8}$/.test(phone)) {
-          setError(t("invalid_phone"));
-          return;
-        }
-        await addLocalCustomer({ id: id.current, name: name.trim(), phone: phone || null, address: address.trim() || null, duePoisha: 0, creditLimitPoisha }, getAuth().user!.id);
-        await onSaved();
+      if (phone && !/^01[3-9]\d{8}$/.test(phone)) {
+        setError(t("invalid_phone"));
         return;
       }
-      const res = await apiFetch(customer ? `/v1/customers/${customer.id}` : "/v1/customers", {
-        method: customer ? "PATCH" : "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: id.current, name, phone: phone || null, address: address.trim() || null, creditLimitPoisha }),
-      });
-      if (!res.ok) setError(await errorText(res, t));
-      else await onSaved();
+      const record = { id: id.current, name: name.trim(), phone: phone || null, address: address.trim() || null, duePoisha: customer?.duePoisha ?? 0, creditLimitPoisha };
+      if (customer) await updateLocalCustomer(record, getAuth().user!.id, uuidv7());
+      else await addLocalCustomer(record, getAuth().user!.id);
+      await onSaved();
     } catch {
       setError(t("saveFailed"));
     } finally {
@@ -134,11 +126,10 @@ function CustomerForm({ customer, t, online, canRemove, onClose, onSaved }: { cu
         <label className="block font-bold">{t("phone")}<input inputMode="tel" maxLength={11} value={phone} onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))} placeholder="01XXXXXXXXX" className={field} /></label>
         <label className="block font-bold">{t("address")}<input maxLength={300} value={address} onChange={(e) => setAddress(e.target.value)} className={field} /></label>
         <label className="block font-bold">{t("creditLimit")}<input inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value.replace(/[^0-9.]/g, ""))} placeholder={t("noLimit")} className={field} /></label>
-        {customer && !online && <p role="alert" className="font-bold text-hot">{t("needOnline")}</p>}
         {error && <p role="alert" className="font-bold text-hot">{error}</p>}
         <div className="flex gap-2">
           <button type="button" className="min-h-14 flex-1 border-[3px] border-line text-lg font-black" onClick={onClose}>{t("cancel")}</button>
-          <button type="submit" disabled={busy || (Boolean(customer) && !online)} className="min-h-14 flex-[2] bg-[#12130f] text-xl font-black text-accent ring-2 ring-line disabled:opacity-40">{busy ? t("saving") : t("save")}</button>
+          <button type="submit" disabled={busy} className="min-h-14 flex-[2] bg-[#12130f] text-xl font-black text-accent ring-2 ring-line disabled:opacity-40">{busy ? t("saving") : t("save")}</button>
         </div>
         {customer && canRemove && online && (
           <button type="button" className="min-h-11 w-full font-bold text-hot underline" onClick={() => void remove()}>{confirmRemove ? t("archiveConfirm") : t("removeCustomer")}</button>
@@ -158,13 +149,23 @@ function CustomerView({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const paymentId = useRef(uuidv7());
+  const [page, setPage] = useState(1);
   const when = (iso: string) => new Date(iso).toLocaleDateString(lang === "bn" ? "bn-BD" : "en-GB");
 
   const load = useCallback(async () => {
     const r = await apiFetch(`/v1/customers/${id}`);
     if (!r.ok) throw new Error();
     setDetail((await r.json()) as CustomerDetail);
+    setPage(1);
   }, [id]);
+
+  async function more() {
+    const r = await apiFetch(`/v1/customers/${id}?page=${page + 1}`);
+    if (!r.ok) return;
+    const next = (await r.json()) as CustomerDetail;
+    setDetail((d) => (d ? { ...next, sales: [...d.sales, ...next.sales], payments: [...d.payments, ...next.payments] } : next));
+    setPage(page + 1);
+  }
 
   useEffect(() => {
     // The history needs the server. Offline, the device's own balance is shown without it.
@@ -260,6 +261,7 @@ function CustomerView({
             )}
           </>
         )}
+        {detail?.hasMore && <button className="min-h-12 w-full border-[3px] border-line font-black" onClick={() => void more()}>{t("loadMore")}</button>}
         {error && <p role="alert" className="font-bold text-hot">{error}</p>}
         <div className="flex gap-2">
           <button className="min-h-14 flex-1 border-[3px] border-line text-lg font-black" onClick={onClose}>{t("close")}</button>

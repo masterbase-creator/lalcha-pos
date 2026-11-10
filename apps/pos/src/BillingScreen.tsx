@@ -1,8 +1,8 @@
-import { BILLING_METHODS, formatNumber, formatTaka, planById, PLANS, subscriptionState, type BillingMethod, type BillingResponse, type Lang } from "@lalcha/domain";
+import { BILLING_METHODS, buyablePlans, formatNumber, formatTaka, planById, subscriptionState, type BillingMethod, type BillingResponse, type Lang } from "@lalcha/domain";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 import type { StringKey } from "./i18n";
-import { apiFetch } from "./session";
+import { apiFetch, siteUrl } from "./session";
 
 type T = (k: StringKey) => string;
 const MONTHS = [1, 3, 6, 12];
@@ -33,7 +33,8 @@ export function BillingScreen({ lang, t, online, onChanged }: { lang: Lang; t: T
 
   const sub = data?.subscription ?? null;
   const state = sub ? subscriptionState(sub) : null;
-  const selected = planById(plan ?? sub?.plan ?? "") ?? PLANS[0];
+  const plans = buyablePlans(sub?.plan);
+  const selected = plans.find((p) => p.id === (plan ?? sub?.plan)) ?? plans[0];
   const amount = selected.monthlyPoisha * months;
   const when = (iso: string) => new Date(iso).toLocaleDateString(lang === "bn" ? "bn-BD" : "en-GB");
   const statusKey = { trial: "subTrial", active: "subActive", grace: "subGrace", expired: "subExpired" } as const;
@@ -78,7 +79,7 @@ export function BillingScreen({ lang, t, online, onChanged }: { lang: Lang; t: T
 
         <h2 className="text-2xl font-black">{t("choosePlan")}</h2>
         <div className="grid gap-2 sm:grid-cols-3">
-          {PLANS.map((p) => (
+          {plans.map((p) => (
             <button
               key={p.id}
               aria-pressed={selected.id === p.id}
@@ -90,6 +91,11 @@ export function BillingScreen({ lang, t, online, onChanged }: { lang: Lang; t: T
               <span className="block font-bold text-muted">{t("perMonth")} · {formatNumber(p.maxDevices, lang)} {t("devices")}</span>
             </button>
           ))}
+          <a href={siteUrl(`${lang === "bn" ? "" : "/en"}/contact/?topic=enterprise`)} target="_blank" rel="noopener" className="border-[3px] border-line bg-panel p-3 text-left">
+            <span className="block text-xl font-black">Enterprise</span>
+            <span className="block text-3xl font-black">{t("planCustom")}</span>
+            <span className="block font-bold text-muted underline">{t("contactUs")} ↗</span>
+          </a>
         </div>
         <div className="grid grid-cols-4 border-[3px] border-line font-black">
           {MONTHS.map((m) => (
@@ -133,7 +139,7 @@ export function BillingScreen({ lang, t, online, onChanged }: { lang: Lang; t: T
                 <li key={p.id} className="flex items-center justify-between gap-3 border-[3px] border-line bg-panel p-3 font-bold">
                   <span className="min-w-0">
                     <span className="block truncate font-black">{planById(p.plan)?.name ?? p.plan} · {formatNumber(p.months, lang)} {t("months")}</span>
-                    <span className="block truncate text-sm text-muted">{when(p.createdAt)} · {t(p.method)} · {p.ref}</span>
+                    <span className="block truncate text-sm text-muted">{when(p.createdAt)} · {p.method === "bkash" || p.method === "nagad" ? t(p.method) : p.method} · {p.ref}</span>
                   </span>
                   <span className="shrink-0 text-right">
                     <span className="block font-black">{formatTaka(p.amountPoisha, lang)}</span>

@@ -6,7 +6,7 @@
     "db:setup": "pnpm --filter @lalcha/api db:setup",
     "test": "pnpm --filter @lalcha/domain test",
     "typecheck": "pnpm -r typecheck",
-    "start": "pnpm --filter @lalcha/pos build && pnpm --parallel --filter @lalcha/api --filter @lalcha/pos run serve"
+    "start": "pnpm --filter @lalcha/pos build && DEMO_URL=http://demo.localhost:4173/ pnpm --filter @lalcha/web build && pnpm --parallel --filter @lalcha/api --filter @lalcha/pos --filter @lalcha/web run serve"
   },
   "packageManager": "pnpm@9.15.9",
   "version": "0.1.0",

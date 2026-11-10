@@ -3,7 +3,7 @@
   "short_name": "Lalcha",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#12130F",
-  "theme_color": "#12130F",
+  "background_color": "#FFFDF6",
+  "theme_color": "#FFFDF6",
   "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
 }

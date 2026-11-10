@@ -1,4 +1,4 @@
-import { formatNumber, formatQty, formatTaka, type Lang, type ReportResponse } from "@lalcha/domain";
+import { formatNumber, formatQty, formatTaka, type BranchRecord, type Lang, type ReportResponse } from "@lalcha/domain";
 import { useEffect, useMemo, useState } from "react";
 import type { StringKey } from "./i18n";
 import { ProductImage, name } from "./ProductImage";
@@ -104,6 +104,8 @@ export function ReportsScreen({ lang, t, online }: { lang: Lang; t: T; online: b
   const [to, setTo] = useState(() => dhakaDate());
   const [report, setReport] = useState<ReportResponse | null>(null);
   const [failed, setFailed] = useState(false);
+  const [branches, setBranches] = useState<BranchRecord[]>([]);
+  const [branch, setBranch] = useState("");
 
   const range = useMemo(() => {
     if (preset === "today") return { from: dhakaDate(), to: dhakaDate() };
@@ -118,7 +120,7 @@ export function ReportsScreen({ lang, t, online }: { lang: Lang; t: T; online: b
       let body: ReportResponse;
       try {
         // A signed-out offline session can't use the server, so any failure falls back to the device.
-        const r = await apiFetch(`/v1/reports?from=${range.from}&to=${range.to}`);
+        const r = await apiFetch(`/v1/reports?from=${range.from}&to=${range.to}${branch ? `&branch=${branch}` : ""}`);
         if (!r.ok) throw new Error();
         body = (await r.json()) as ReportResponse;
       } catch {
@@ -137,7 +139,14 @@ export function ReportsScreen({ lang, t, online }: { lang: Lang; t: T; online: b
     return () => {
       cancelled = true;
     };
-  }, [range, online]);
+  }, [range, online, branch]);
+
+  useEffect(() => {
+    if (!online) return;
+    void apiFetch("/v1/branches").then(async (r) => {
+      if (r.ok) setBranches(((await r.json()) as { branches: BranchRecord[] }).branches);
+    }).catch(() => undefined);
+  }, [online]);
 
   const money = (p: number) => formatTaka(p, lang);
   const dayLabel = (d: string) => new Date(`${d}T12:00:00+06:00`).toLocaleDateString(lang === "bn" ? "bn-BD" : "en-GB", { day: "numeric", month: "short" });
@@ -208,6 +217,12 @@ export function ReportsScreen({ lang, t, online }: { lang: Lang; t: T; online: b
             <button key={p} aria-pressed={preset === p} onClick={() => setPreset(p)} className={`min-h-12 ${preset === p ? "bg-text text-bg" : "bg-panel"}`}>{t(label)}</button>
           ))}
         </div>
+        {branches.length > 1 && (
+          <select aria-label={t("branches")} value={branch} onChange={(e) => setBranch(e.target.value)} className="h-12 w-full border-[3px] border-line bg-panel px-3 font-black">
+            <option value="">{t("allBranches")}</option>
+            {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        )}
         {preset === "custom" && (
           <div className="grid grid-cols-2 gap-2">
             <label className="block font-bold">{t("fromDate")}<input type="date" max={to} value={from} onChange={(e) => setFrom(e.target.value)} className={inputClass} /></label>
@@ -259,7 +274,7 @@ export function ReportsScreen({ lang, t, online }: { lang: Lang; t: T; online: b
                 {report.topProducts.length === 0 && <p className="py-2 font-bold text-muted">{t("noSales")}</p>}
                 {report.topProducts.map((p) => (
                   <div key={p.id} className={rowClass}>
-                    <span className="relative h-11 w-11 shrink-0 bg-tile"><ProductImage product={{ ...p, sku: "", barcode: null, category: "", pricePoisha: 0, stock: 0 }} lang={lang} /></span>
+                    <span className="relative h-11 w-11 shrink-0 bg-tile"><ProductImage product={p} lang={lang} /></span>
                     <span className="min-w-0 flex-1 truncate">{name(p, lang)}<span className="block text-sm text-muted">{formatQty(p.qty, p.unit, lang)} {t("sold")}</span></span>
                     <span className="font-black">{money(p.salesPoisha)}</span>
                   </div>
@@ -289,7 +304,7 @@ export function ReportsScreen({ lang, t, online }: { lang: Lang; t: T; online: b
                 {report.lowStock.length === 0 && <p className="py-2 font-bold text-muted">{t("noLowStock")}</p>}
                 {report.lowStock.map((p) => (
                   <div key={p.id} className={rowClass}>
-                    <span className="relative h-11 w-11 shrink-0 bg-tile"><ProductImage product={{ ...p, sku: "", barcode: null, category: "", pricePoisha: 0 }} lang={lang} /></span>
+                    <span className="relative h-11 w-11 shrink-0 bg-tile"><ProductImage product={p} lang={lang} /></span>
                     <span className="min-w-0 flex-1 truncate">{name(p, lang)}</span>
                     <span className="font-black text-hot">{formatQty(p.stock, p.unit, lang)}</span>
                   </div>

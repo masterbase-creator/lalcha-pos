@@ -1,16 +1,17 @@
-import type { DeviceRecord, Lang, StaffRecord } from "@lalcha/domain";
+import type { BranchRecord, DeviceRecord, Lang, StaffRecord } from "@lalcha/domain";
 import { useCallback, useEffect, useState } from "react";
 import type { StringKey } from "./i18n";
 import { apiFetch, type CurrentUser } from "./session";
 
 type T = (k: StringKey) => string;
 const fieldClass = "mt-1 h-12 w-full border-[3px] border-line bg-bg px-3 text-lg font-bold";
-const FORM_ERRORS: StringKey[] = ["invalid_pin", "weak_pin", "phone_required", "invalid_phone", "duplicate_phone", "forbidden", "name_required"];
+const FORM_ERRORS: StringKey[] = ["invalid_pin", "weak_pin", "email_required", "invalid_email", "duplicate_email", "invalid_phone", "duplicate_phone", "forbidden", "name_required"];
 
 export function StaffScreen({ user, lang, t, online }: { user: CurrentUser; lang: Lang; t: T; online: boolean }) {
   const [staff, setStaff] = useState<StaffRecord[]>([]);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
   const [currentDevice, setCurrentDevice] = useState("");
+  const [branches, setBranches] = useState<BranchRecord[]>([]);
   const [editing, setEditing] = useState<{ member: StaffRecord | null } | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -27,6 +28,8 @@ export function StaffScreen({ user, lang, t, online }: { user: CurrentUser; lang
         const body = (await d.json()) as { devices: DeviceRecord[]; currentId: string };
         setDevices(body.devices);
         setCurrentDevice(body.currentId);
+        const b = await apiFetch("/v1/branches");
+        if (b.ok) setBranches(((await b.json()) as { branches: BranchRecord[] }).branches);
       }
       setFailed(false);
     } catch {
@@ -72,7 +75,7 @@ export function StaffScreen({ user, lang, t, online }: { user: CurrentUser; lang
               >
                 <span className="min-w-0">
                   <span className="block truncate text-lg font-black">{m.name}</span>
-                  <span className="block font-bold text-muted">{m.phone ?? "—"}</span>
+                  <span className="block font-bold text-muted">{m.email ?? m.phone ?? "—"}</span>
                 </span>
                 <span className="shrink-0 bg-text px-2 py-1 font-black text-bg">{m.disabled ? t("disabled") : t(m.role)}</span>
               </button>
@@ -92,6 +95,17 @@ export function StaffScreen({ user, lang, t, online }: { user: CurrentUser; lang
                       {d.id === currentDevice ? t("thisDevice") : new Date(d.lastSeenAt).toLocaleString(lang === "bn" ? "bn-BD" : "en-GB")}
                     </span>
                   </span>
+                  {branches.length > 1 && (
+                    <select
+                      aria-label={`${t("branches")}: ${d.name}`}
+                      disabled={!online}
+                      value={d.branchId}
+                      onChange={(e) => void apiFetch(`/v1/devices/${d.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ branchId: e.target.value }) }).then(load)}
+                      className="h-11 shrink-0 border-2 border-line bg-bg px-2 font-bold"
+                    >
+                      {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                  )}
                   {d.id !== currentDevice && (
                     <button disabled={!online} className="min-h-11 shrink-0 font-bold text-hot underline" onClick={() => void revoke(d.id)}>
                       {confirming === d.id ? t("archiveConfirm") : t("removeDevice")}
@@ -123,6 +137,7 @@ export function StaffScreen({ user, lang, t, online }: { user: CurrentUser; lang
 
 function StaffForm({ member, user, t, onClose, onSaved }: { member: StaffRecord | null; user: CurrentUser; t: T; onClose: () => void; onSaved: () => Promise<void> }) {
   const [name, setName] = useState(member?.name ?? "");
+  const [email, setEmail] = useState(member?.email ?? "");
   const [phone, setPhone] = useState(member?.phone ?? "");
   const [role, setRole] = useState(member?.role === "manager" ? "manager" : "cashier");
   const [pin, setPin] = useState("");
@@ -135,7 +150,7 @@ function StaffForm({ member, user, t, onClose, onSaved }: { member: StaffRecord 
     if (busy) return;
     setBusy(true);
     setError("");
-    const fields = { name, phone: phone || null, role: isOwnerRecord ? "manager" : role };
+    const fields = { name, email: email.trim().toLowerCase() || null, phone: phone || null, role: isOwnerRecord ? "manager" : role };
     try {
       const res = member
         ? await apiFetch(`/v1/staff/${member.id}`, {
@@ -175,6 +190,11 @@ function StaffForm({ member, user, t, onClose, onSaved }: { member: StaffRecord 
         <label className="block font-bold">
           {t("staffName")}
           <input autoFocus required maxLength={100} value={name} onChange={(e) => setName(e.target.value)} className={fieldClass} />
+        </label>
+        <label className="block font-bold">
+          {t("email")}
+          <input type="email" inputMode="email" autoComplete="off" maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" className={fieldClass} />
+          <span className="block text-sm text-muted">{t("emailHelp")}</span>
         </label>
         <label className="block font-bold">
           {t("phone")}

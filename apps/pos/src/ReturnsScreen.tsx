@@ -1,4 +1,4 @@
-import { formatQty, formatTaka, isLoose, lineAmount, QTY_SCALE, returnValue, type CatalogProduct, type CustomerSummary, type Lang, type ReturnResult } from "@lalcha/domain";
+import { formatQty, formatTaka, isLoose, QTY_SCALE, returnValue, type CatalogProduct, type CustomerSummary, type Lang, type ReturnResult } from "@lalcha/domain";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 import type { StringKey } from "./i18n";
@@ -69,9 +69,8 @@ function SaleReturn({
   const returnId = useRef(uuidv7());
 
   const money = (p: number) => formatTaka(p, lang);
-  const subtotal = sale.lines.reduce((sum, l) => sum + lineAmount(l.qty, l.unitPricePoisha), 0);
   const estimate = Math.min(
-    sale.lines.reduce((sum, l) => sum + returnValue(picked[l.lineNo]?.qty ?? 0, l.unitPricePoisha, subtotal, sale.totalPoisha), 0),
+    sale.lines.reduce((sum, l) => sum + returnValue(picked[l.lineNo]?.qty ?? 0, l.qty, l.finalPoisha), 0),
     sale.totalPoisha - sale.returnedPoisha,
   );
   const lines = Object.entries(picked).filter(([, v]) => v.qty > 0).map(([lineNo, v]) => ({ lineNo: Number(lineNo), qty: v.qty, restock: v.restock }));

@@ -38,3 +38,9 @@ export async function parse<T extends z.ZodTypeAny>(c: Context<Env>, schema: T):
   if (!body.success) throw new ApiError(body.error.issues[0]?.message ?? "invalid");
   return body.data;
 }
+
+export const PAGE_SIZE = 50;
+export function pageOf(c: Context<Env>) {
+  const page = Math.max(1, Number.parseInt(c.req.query("page") ?? "1", 10) || 1);
+  return { page, offset: (page - 1) * PAGE_SIZE };
+}

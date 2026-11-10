@@ -38,7 +38,7 @@
   --color-accent: var(--accent);
   --color-on-accent: var(--on-accent);
   --color-hot: var(--hot);
-  --font-sans: "Archivo", "Hind Siliguri", system-ui, sans-serif;
+  --font-sans: "Archivo", "Lalcha Digits", "Hind Siliguri", system-ui, sans-serif;
 }
 
 html,

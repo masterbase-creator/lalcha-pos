@@ -16,9 +16,9 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { managers } from "./auth.ts";
-import { withStore, type Env, type Tx } from "./db.ts";
-import { ApiError, guarded, idParam, parse } from "./http.ts";
-import { products, purchaseLines, purchaseReturnLines, purchaseReturns, purchases, stockLedger, supplierPayments, suppliers } from "./schema.ts";
+import { audit, withStore, type Env, type Tx } from "./db.ts";
+import { ApiError, guarded, idParam, PAGE_SIZE, pageOf, parse } from "./http.ts";
+import { products, purchaseLines, purchaseReceipts, purchaseReturnLines, purchaseReturns, purchases, stockLedger, supplierPayments, suppliers } from "./schema.ts";
 
 type Line = { productId: string; qty: number; unitCostPoisha: number };
 
@@ -28,43 +28,42 @@ const totalsOf = (lines: Line[], discountPoisha: number) =>
 /**
  * Adds received goods to stock and updates each product's weighted average cost.
  * Products are locked in a fixed order, so two simultaneous purchases can't deadlock or miscount.
+ * Returns what these goods are worth, after their share of any bill discount.
  */
-async function receiveIntoStock(tx: Tx, storeId: string, purchaseId: string, lines: Line[], discountPoisha: number, actorId: string) {
-  const { subtotalPoisha, totalPoisha } = totalsOf(lines, discountPoisha);
+async function receiveIntoStock(tx: Tx, storeId: string, purchase: { id: string; branchId: string; subtotalPoisha: number; totalPoisha: number }, receiving: Line[], actorId: string) {
   const grouped = new Map<string, { qty: number; value: bigint }>();
-  for (const l of lines) {
+  for (const l of receiving) {
     const entry = grouped.get(l.productId) ?? { qty: 0, value: 0n };
     entry.qty += l.qty;
-    // A bill-level discount lowers what each item really cost.
-    entry.value += subtotalPoisha === 0 ? 0n : (BigInt(l.qty) * BigInt(l.unitCostPoisha) * BigInt(totalPoisha)) / (BigInt(subtotalPoisha) * BigInt(QTY_SCALE));
+    entry.value += purchase.subtotalPoisha === 0 ? 0n : (BigInt(l.qty) * BigInt(l.unitCostPoisha) * BigInt(purchase.totalPoisha)) / (BigInt(purchase.subtotalPoisha) * BigInt(QTY_SCALE));
     grouped.set(l.productId, entry);
   }
-
+  let worth = 0n;
   for (const productId of [...grouped.keys()].sort()) {
     const { qty, value } = grouped.get(productId)!;
+    worth += value;
     const where = and(eq(products.storeId, storeId), eq(products.id, productId), isNull(products.archivedAt));
     const [product] = await tx.select({ costPoisha: products.costPoisha }).from(products).where(where).for("update");
     if (!product) throw new ApiError("unknown_product");
-    const [{ stock }] = await tx
-      .select({ stock: sql<number>`coalesce(sum(${stockLedger.qtyDelta}), 0)::float8` })
-      .from(stockLedger)
-      .where(and(eq(stockLedger.storeId, storeId), eq(stockLedger.productId, productId)));
+    // Average cost is store-wide, so it counts stock across every branch.
+    const stock = await stockOf(tx, storeId, productId);
     // Stock can be negative after offline sales; those units have no cost to average in.
-    const held = BigInt(Math.max(stock, 0));
+    const held = BigInt(Math.max(Math.round(stock), 0));
     const units = held + BigInt(qty);
     const averageCost = (held * BigInt(product.costPoisha) + value * BigInt(QTY_SCALE) + units / 2n) / units;
     await tx.update(products).set({ costPoisha: Number(averageCost) }).where(where);
-    await tx.insert(stockLedger).values({ storeId, productId, qtyDelta: qty, reason: "purchase", refId: purchaseId, actorId });
+    await tx.insert(stockLedger).values({ storeId, branchId: purchase.branchId, productId, qtyDelta: qty, reason: "purchase", refId: purchase.id, actorId });
   }
+  return Number(worth);
 }
 
 export async function supplierDues(tx: Tx, storeId: string, supplierId?: string) {
   const onlySupplier = (column: typeof purchases.supplierId | typeof supplierPayments.supplierId) =>
     supplierId ? eq(column, supplierId) : undefined;
   const billed = await tx
-    .select({ id: purchases.supplierId, amount: sql<string>`sum(${purchases.totalPoisha})` })
+    .select({ id: purchases.supplierId, amount: sql<string>`sum(${purchases.receivedValuePoisha})` })
     .from(purchases)
-    .where(and(eq(purchases.storeId, storeId), eq(purchases.status, "received"), onlySupplier(purchases.supplierId)))
+    .where(and(eq(purchases.storeId, storeId), inArray(purchases.status, ["partial", "received"]), onlySupplier(purchases.supplierId)))
     .groupBy(purchases.supplierId);
   const paid = await tx
     .select({ id: supplierPayments.supplierId, amount: sql<string>`sum(${supplierPayments.amountPoisha})` })
@@ -92,11 +91,11 @@ async function returnedByLine(tx: Tx, storeId: string, purchaseId: string) {
   return new Map(rows.map((r) => [r.lineNo, r.qty]));
 }
 
-async function stockOf(tx: Tx, storeId: string, productId: string) {
+async function stockOf(tx: Tx, storeId: string, productId: string, branchId?: string) {
   const [{ stock }] = await tx
     .select({ stock: sql<number>`coalesce(sum(${stockLedger.qtyDelta}), 0)::float8` })
     .from(stockLedger)
-    .where(and(eq(stockLedger.storeId, storeId), eq(stockLedger.productId, productId)));
+    .where(and(eq(stockLedger.storeId, storeId), eq(stockLedger.productId, productId), branchId ? eq(stockLedger.branchId, branchId) : undefined));
   return stock;
 }
 
@@ -143,7 +142,10 @@ export function registerPurchases(app: Hono<Env>) {
       const store = c.get("store");
       const input = await parse(c, supplierInputSchema);
       const id = randomUUID();
-      await withStore(store.id, (tx) => tx.insert(suppliers).values({ storeId: store.id, id, ...input }));
+      await withStore(store.id, async (tx) => {
+        await tx.insert(suppliers).values({ storeId: store.id, id, ...input });
+        await audit(tx, store.id, c.get("user").id, "supplier_create", id, { name: input.name });
+      });
       return c.json({ id }, 201);
     }),
   );
@@ -154,7 +156,10 @@ export function registerPurchases(app: Hono<Env>) {
       const store = c.get("store");
       const id = idParam(c);
       const input = await parse(c, supplierInputSchema);
-      const rows = await withStore(store.id, (tx) => tx.update(suppliers).set(input).where(activeSupplier(store.id, id)).returning({ id: suppliers.id }));
+      const rows = await withStore(store.id, async (tx) => {
+        await audit(tx, store.id, c.get("user").id, "supplier_update", id, { name: input.name });
+        return tx.update(suppliers).set(input).where(activeSupplier(store.id, id)).returning({ id: suppliers.id });
+      });
       if (!rows.length) throw new ApiError("not_found", 404);
       return c.json({ ok: true });
     }),
@@ -171,6 +176,7 @@ export function registerPurchases(app: Hono<Env>) {
         const dues = await supplierDues(tx, store.id, id);
         if ((dues.get(id) ?? 0) !== 0) throw new ApiError("supplier_has_due", 409);
         await tx.update(suppliers).set({ archivedAt: new Date() }).where(activeSupplier(store.id, id));
+        await audit(tx, store.id, c.get("user").id, "supplier_remove", id);
       });
       return c.json({ ok: true });
     }),
@@ -199,10 +205,12 @@ export function registerPurchases(app: Hono<Env>) {
           .from(supplierPayments)
           .where(and(eq(supplierPayments.storeId, store.id), eq(supplierPayments.supplierId, id)))
           .orderBy(desc(supplierPayments.paidAt))
-          .limit(100);
+          .limit(PAGE_SIZE + 1)
+          .offset(pageOf(c).offset);
         return {
           supplier: { ...supplier, duePoisha: dues.get(id) ?? 0 },
-          payments: payments.map((p) => ({ ...p, paidAt: p.paidAt.toISOString() })),
+          payments: payments.slice(0, PAGE_SIZE).map((p) => ({ ...p, paidAt: p.paidAt.toISOString() })),
+          hasMore: payments.length > PAGE_SIZE,
         };
       });
       return c.json(detail);
@@ -224,8 +232,7 @@ export function registerPurchases(app: Hono<Env>) {
           .from(supplierPayments)
           .where(and(eq(supplierPayments.storeId, store.id), eq(supplierPayments.id, input.id)));
         if (existing) return; // A retried request must not pay twice.
-        const dues = await supplierDues(tx, store.id, id);
-        if (input.amountPoisha > (dues.get(id) ?? 0)) throw new ApiError("exceeds_due");
+        // Paying more than is owed is allowed: the extra stays as an advance, shown as a negative due.
         await tx.insert(supplierPayments).values({
           storeId: store.id,
           id: input.id,
@@ -235,6 +242,7 @@ export function registerPurchases(app: Hono<Env>) {
           ref: input.ref,
           createdBy: c.get("user").id,
         });
+        await audit(tx, store.id, c.get("user").id, "supplier_payment", id, { amountPoisha: input.amountPoisha, method: input.method });
       });
       return c.json({ ok: true });
     }),
@@ -259,10 +267,12 @@ export function registerPurchases(app: Hono<Env>) {
           .innerJoin(suppliers, and(eq(suppliers.storeId, purchases.storeId), eq(suppliers.id, purchases.supplierId)))
           .where(eq(purchases.storeId, store.id))
           .orderBy(desc(purchases.purchasedAt), desc(purchases.id))
-          .limit(200),
+          .limit(PAGE_SIZE + 1)
+          .offset(pageOf(c).offset),
       );
-      return c.json<{ purchases: PurchaseSummary[] }>({
-        purchases: rows.map((r) => ({ ...r, purchasedAt: r.purchasedAt.toISOString() })),
+      return c.json<{ purchases: PurchaseSummary[]; hasMore: boolean }>({
+        purchases: rows.slice(0, PAGE_SIZE).map((r) => ({ ...r, purchasedAt: r.purchasedAt.toISOString() })),
+        hasMore: rows.length > PAGE_SIZE,
       });
     }),
   );
@@ -297,6 +307,7 @@ export function registerPurchases(app: Hono<Env>) {
             imageUrl: products.imageUrl,
             unit: products.unit,
             qty: purchaseLines.qty,
+            receivedQty: purchaseLines.receivedQty,
             unitCostPoisha: purchaseLines.unitCostPoisha,
           })
           .from(purchaseLines)
@@ -320,7 +331,8 @@ export function registerPurchases(app: Hono<Env>) {
       const store = c.get("store");
       const actor = c.get("user");
       const input = await parse(c, purchaseCreateSchema);
-      const { totalPoisha } = totalsOf(input.lines, input.discountPoisha);
+      const { subtotalPoisha, totalPoisha } = totalsOf(input.lines, input.discountPoisha);
+      const branchId = c.get("device").branchId;
       await withStore(store.id, async (tx) => {
         const [supplier] = await tx.select({ id: suppliers.id }).from(suppliers).where(activeSupplier(store.id, input.supplierId));
         if (!supplier) throw new ApiError("unknown_supplier");
@@ -332,6 +344,8 @@ export function registerPurchases(app: Hono<Env>) {
             supplierId: input.supplierId,
             invoiceNo: input.invoiceNo,
             purchasedAt: new Date(input.purchasedAt),
+            branchId,
+            receivedValuePoisha: input.receiveNow ? totalPoisha : 0,
             status: input.receiveNow ? "received" : "ordered",
             receivedAt: input.receiveNow ? new Date() : null,
             discountPoisha: input.discountPoisha,
@@ -341,9 +355,10 @@ export function registerPurchases(app: Hono<Env>) {
           .onConflictDoNothing({ target: [purchases.storeId, purchases.id] })
           .returning({ id: purchases.id });
         if (!inserted.length) return; // Already saved: a retry must not add the stock again.
-        await tx.insert(purchaseLines).values(input.lines.map((l, i) => ({ storeId: store.id, purchaseId: input.id, lineNo: i + 1, ...l })));
-        if (!input.receiveNow) return;
-        await receiveIntoStock(tx, store.id, input.id, input.lines, input.discountPoisha, actor.id);
+        await tx.insert(purchaseLines).values(input.lines.map((l, i) => ({ storeId: store.id, purchaseId: input.id, lineNo: i + 1, ...l, receivedQty: input.receiveNow ? l.qty : 0 })));
+        await audit(tx, store.id, actor.id, "purchase_create", input.id, { totalPoisha, received: input.receiveNow });
+        if (input.receiveNow) await receiveIntoStock(tx, store.id, { id: input.id, branchId, subtotalPoisha, totalPoisha }, input.lines, actor.id);
+        // Money paid before delivery becomes an advance on the supplier's account.
         if (input.paidPoisha > 0) {
           await tx.insert(supplierPayments).values({
             storeId: store.id,
@@ -369,19 +384,36 @@ export function registerPurchases(app: Hono<Env>) {
       const id = idParam(c);
       const input = await parse(c, purchaseReceiveSchema);
       await withStore(store.id, async (tx) => {
-        // Only one request can move an order out of "ordered", so stock can't be received twice.
-        const [p] = await tx
+        // One delivery at a time per order, so two people can't receive the same goods.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`purchase:${store.id}:${id}`}, 0))`);
+        const [seen] = await tx.select({ id: purchaseReceipts.id }).from(purchaseReceipts).where(and(eq(purchaseReceipts.storeId, store.id), eq(purchaseReceipts.id, input.id)));
+        if (seen) return; // A retried request must not add the delivery twice.
+        const [p] = await tx.select().from(purchases).where(and(eq(purchases.storeId, store.id), eq(purchases.id, id)));
+        if (!p) throw new ApiError("not_found", 404);
+        if (p.status !== "ordered" && p.status !== "partial") throw new ApiError("not_open", 409);
+        const lines = await tx.select().from(purchaseLines).where(and(eq(purchaseLines.storeId, store.id), eq(purchaseLines.purchaseId, id)));
+        const requested = input.lines ?? lines.filter((l) => l.qty > l.receivedQty).map((l) => ({ lineNo: l.lineNo, qty: l.qty - l.receivedQty }));
+        if (requested.length === 0) throw new ApiError("no_lines");
+        const receiving: Line[] = requested.map((r) => {
+          const line = lines.find((l) => l.lineNo === r.lineNo);
+          if (!line) throw new ApiError("unknown_reference");
+          if (r.qty > line.qty - line.receivedQty) throw new ApiError("exceeds_order");
+          return { productId: line.productId, qty: r.qty, unitCostPoisha: line.unitCostPoisha };
+        });
+        const { subtotalPoisha } = totalsOf(lines, p.discountPoisha);
+        let worth = await receiveIntoStock(tx, store.id, { id, branchId: p.branchId, subtotalPoisha, totalPoisha: p.totalPoisha }, receiving, actor.id);
+        for (const r of requested) {
+          await tx.update(purchaseLines).set({ receivedQty: sql`${purchaseLines.receivedQty} + ${r.qty}` }).where(and(eq(purchaseLines.storeId, store.id), eq(purchaseLines.purchaseId, id), eq(purchaseLines.lineNo, r.lineNo)));
+        }
+        const complete = lines.every((l) => l.receivedQty + (requested.find((r) => r.lineNo === l.lineNo)?.qty ?? 0) >= l.qty);
+        // The last delivery settles any rounding, so the bill ends exactly on its total.
+        if (complete) worth = p.totalPoisha - p.receivedValuePoisha;
+        await tx
           .update(purchases)
-          .set({ status: "received", receivedAt: new Date() })
-          .where(and(eq(purchases.storeId, store.id), eq(purchases.id, id), eq(purchases.status, "ordered")))
-          .returning({ supplierId: purchases.supplierId, discountPoisha: purchases.discountPoisha, totalPoisha: purchases.totalPoisha });
-        if (!p) throw new ApiError("not_open", 409);
-        if (input.paidPoisha > p.totalPoisha) throw new ApiError("paid_exceeds_total");
-        const lines = await tx
-          .select({ productId: purchaseLines.productId, qty: purchaseLines.qty, unitCostPoisha: purchaseLines.unitCostPoisha })
-          .from(purchaseLines)
-          .where(and(eq(purchaseLines.storeId, store.id), eq(purchaseLines.purchaseId, id)));
-        await receiveIntoStock(tx, store.id, id, lines, p.discountPoisha, actor.id);
+          .set({ status: complete ? "received" : "partial", receivedAt: new Date(), receivedValuePoisha: p.receivedValuePoisha + worth })
+          .where(and(eq(purchases.storeId, store.id), eq(purchases.id, id)));
+        await tx.insert(purchaseReceipts).values({ storeId: store.id, id: input.id, purchaseId: id, createdBy: actor.id });
+        await audit(tx, store.id, actor.id, "purchase_receive", id, { worthPoisha: worth, complete });
         if (input.paidPoisha > 0) {
           await tx.insert(supplierPayments).values({
             storeId: store.id,
@@ -394,6 +426,25 @@ export function registerPurchases(app: Hono<Env>) {
             createdBy: actor.id,
           });
         }
+      });
+      return c.json({ ok: true });
+    }),
+  );
+
+  // The supplier won't send the rest: the bill stays at what actually arrived.
+  app.post(
+    "/v1/purchases/:id/close",
+    guarded(async (c) => {
+      const store = c.get("store");
+      const id = idParam(c);
+      await withStore(store.id, async (tx) => {
+        const rows = await tx
+          .update(purchases)
+          .set({ status: "received" })
+          .where(and(eq(purchases.storeId, store.id), eq(purchases.id, id), eq(purchases.status, "partial")))
+          .returning({ id: purchases.id });
+        if (!rows.length) throw new ApiError("not_open", 409);
+        await audit(tx, store.id, c.get("user").id, "purchase_close", id);
       });
       return c.json({ ok: true });
     }),
@@ -415,7 +466,7 @@ export function registerPurchases(app: Hono<Env>) {
         if (done) return done;
         const [p] = await tx.select().from(purchases).where(and(eq(purchases.storeId, store.id), eq(purchases.id, id)));
         if (!p) throw new ApiError("not_found", 404);
-        if (p.status !== "received") throw new ApiError("not_open", 409);
+        if (p.status !== "received" && p.status !== "partial") throw new ApiError("not_open", 409);
         const lines = await tx.select().from(purchaseLines).where(and(eq(purchaseLines.storeId, store.id), eq(purchaseLines.purchaseId, id)));
         const back = await returnedByLine(tx, store.id, id);
         const subtotal = lines.reduce((sum, l) => sum + lineAmount(l.qty, l.unitCostPoisha), 0);
@@ -423,11 +474,11 @@ export function registerPurchases(app: Hono<Env>) {
         for (const request of [...input.lines].sort((a, b) => a.lineNo - b.lineNo)) {
           const line = lines.find((l) => l.lineNo === request.lineNo);
           if (!line) throw new ApiError("unknown_reference");
-          if (request.qty > line.qty - (back.get(line.lineNo) ?? 0)) throw new ApiError("exceeds_sold");
+          if (request.qty > line.receivedQty - (back.get(line.lineNo) ?? 0)) throw new ApiError("exceeds_sold");
           await tx.select({ id: products.id }).from(products).where(and(eq(products.storeId, store.id), eq(products.id, line.productId))).for("update");
-          if ((await stockOf(tx, store.id, line.productId)) < request.qty) throw new ApiError("insufficient_stock");
+          if ((await stockOf(tx, store.id, line.productId, p.branchId)) < request.qty) throw new ApiError("insufficient_stock");
           value += subtotal === 0 ? 0 : Math.floor((lineAmount(request.qty, line.unitCostPoisha) * p.totalPoisha) / subtotal);
-          await tx.insert(stockLedger).values({ storeId: store.id, productId: line.productId, qtyDelta: -request.qty, reason: "purchase_return", refId: input.id, actorId: actor.id });
+          await tx.insert(stockLedger).values({ storeId: store.id, branchId: p.branchId, productId: line.productId, qtyDelta: -request.qty, reason: "purchase_return", refId: input.id, actorId: actor.id });
         }
         await tx.select({ id: suppliers.id }).from(suppliers).where(and(eq(suppliers.storeId, store.id), eq(suppliers.id, p.supplierId))).for("update");
         const dues = await supplierDues(tx, store.id, p.supplierId);
@@ -435,6 +486,7 @@ export function registerPurchases(app: Hono<Env>) {
         const cashBackPoisha = value - creditPoisha;
         await tx.insert(purchaseReturns).values({ storeId: store.id, id: input.id, purchaseId: id, supplierId: p.supplierId, valuePoisha: value, creditPoisha, cashBackPoisha, createdBy: actor.id });
         await tx.insert(purchaseReturnLines).values(input.lines.map((l) => ({ storeId: store.id, returnId: input.id, purchaseId: id, lineNo: l.lineNo, qty: l.qty })));
+        await audit(tx, store.id, actor.id, "purchase_return", id, { valuePoisha: value });
         return { valuePoisha: value, creditPoisha, cashBackPoisha };
       });
       return c.json(result, 201);
@@ -451,7 +503,7 @@ export function registerPurchases(app: Hono<Env>) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`purchase:${store.id}:${id}`}, 0))`);
         const [p] = await tx.select().from(purchases).where(and(eq(purchases.storeId, store.id), eq(purchases.id, id)));
         if (!p) throw new ApiError("not_found", 404);
-        if (p.status !== "received") throw new ApiError("not_open", 409);
+        if (p.status !== "received" && p.status !== "partial") throw new ApiError("not_open", 409);
         if ((await returnedByLine(tx, store.id, id)).size > 0) throw new ApiError("has_returns", 409);
         const lines = await tx.select().from(purchaseLines).where(and(eq(purchaseLines.storeId, store.id), eq(purchaseLines.purchaseId, id)));
         const { subtotalPoisha, totalPoisha } = totalsOf(lines, p.discountPoisha);
@@ -460,16 +512,18 @@ export function registerPurchases(app: Hono<Env>) {
           const [product] = await tx.select({ costPoisha: products.costPoisha }).from(products).where(where).for("update");
           const stock = await stockOf(tx, store.id, line.productId);
           // Refused once the goods are sold: reversing them would invent stock the store doesn't have.
-          if (stock < line.qty) throw new ApiError("stock_already_used", 409);
-          const left = BigInt(Math.round(stock - line.qty));
+          if ((await stockOf(tx, store.id, line.productId, p.branchId)) < line.receivedQty) throw new ApiError("stock_already_used", 409);
+          if (line.receivedQty === 0) continue;
+          const left = BigInt(Math.round(stock - line.receivedQty));
           if (left > 0n && subtotalPoisha > 0) {
-            const value = (BigInt(line.qty) * BigInt(line.unitCostPoisha) * BigInt(totalPoisha)) / BigInt(subtotalPoisha);
+            const value = (BigInt(line.receivedQty) * BigInt(line.unitCostPoisha) * BigInt(totalPoisha)) / BigInt(subtotalPoisha);
             const cost = (BigInt(Math.round(stock)) * BigInt(product.costPoisha) - value + left / 2n) / left;
             await tx.update(products).set({ costPoisha: Number(cost < 0n ? 0n : cost) }).where(where);
           }
-          await tx.insert(stockLedger).values({ storeId: store.id, productId: line.productId, qtyDelta: -line.qty, reason: "purchase_void", refId: id, actorId: actor.id });
+          await tx.insert(stockLedger).values({ storeId: store.id, branchId: p.branchId, productId: line.productId, qtyDelta: -line.receivedQty, reason: "purchase_void", refId: id, actorId: actor.id });
         }
         await tx.update(purchases).set({ status: "voided" }).where(and(eq(purchases.storeId, store.id), eq(purchases.id, id)));
+        await audit(tx, store.id, actor.id, "purchase_void", id, { totalPoisha: p.totalPoisha });
         // Money paid with this bill comes back as a reversing entry, so payment history stays intact.
         const [{ paid }] = await tx
           .select({ paid: sql<string>`coalesce(sum(${supplierPayments.amountPoisha}), 0)` })
@@ -496,6 +550,7 @@ export function registerPurchases(app: Hono<Env>) {
           .returning({ id: purchases.id }),
       );
       if (!rows.length) throw new ApiError("not_open", 409);
+      await withStore(store.id, (tx) => audit(tx, store.id, c.get("user").id, "purchase_cancel", id));
       return c.json({ ok: true });
     }),
   );

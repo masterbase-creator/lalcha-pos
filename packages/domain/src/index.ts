@@ -12,9 +12,11 @@ const poisha = z.number().int().nonnegative().max(100_000_000_000);
 
 /** Quantities are whole thousandths, so 1 piece is 1000 and 1.25 kg is 1250. */
 export const QTY_SCALE = 1000;
-export const UNITS = ["pc", "kg", "litre", "metre"] as const;
+/** How a product is counted. Measured units can be sold in fractions (1.25 kg); counted ones only whole. */
+export const UNITS = ["pc", "kg", "gram", "litre", "ml", "metre", "feet", "yard", "sqft", "dozen", "hali", "box", "pack", "bag"] as const;
 export type Unit = (typeof UNITS)[number];
-export const isLoose = (unit: Unit) => unit !== "pc";
+export const MEASURED_UNITS: readonly Unit[] = ["kg", "gram", "litre", "ml", "metre", "feet", "yard", "sqft"];
+export const isLoose = (unit: Unit) => MEASURED_UNITS.includes(unit);
 const MAX_QTY = 100_000_000;
 export const lineAmount = (qty: number, unitPricePoisha: number) => Math.round((qty * unitPricePoisha) / QTY_SCALE);
 
@@ -27,8 +29,50 @@ export const saleLineSchema = z.object({
   qty: z.number().int().positive().max(MAX_QTY),
   unitPricePoisha: poisha,
   unit: z.enum(UNITS).default("pc"),
+  vatRateBp: z.number().int().min(0).max(10_000).default(0),
+  /** For a pack (a dozen, a sack): how much of the product's own unit one sold pack uses, in thousandths. */
+  packQty: z.number().int().positive().max(MAX_QTY).default(QTY_SCALE),
+  packName: z.string().trim().max(40).nullable().default(null),
 });
 export type SaleLine = z.infer<typeof saleLineSchema>;
+
+/**
+ * The full bill: spreads the discount across lines, then applies each line's own VAT rate.
+ * The per-line result is what a later return refunds, so mixed rates stay exact.
+ */
+export function computeBill(lines: { qty: number; unitPricePoisha: number; vatRateBp?: number }[], discountPoisha: number, vatInclusive: boolean) {
+  const amounts = lines.map((l) => lineAmount(l.qty, l.unitPricePoisha));
+  const subtotalPoisha = amounts.reduce((a, b) => a + b, 0);
+  const discount = Math.min(Math.max(0, discountPoisha), subtotalPoisha);
+  let left = discount;
+  const result = amounts.map((amount, i) => {
+    const share = i === amounts.length - 1 ? left : subtotalPoisha ? Math.min(left, Math.round((amount * discount) / subtotalPoisha)) : 0;
+    left -= share;
+    const net = amount - share;
+    const rate = lines[i].vatRateBp ?? 0;
+    const vatPoisha = vatInclusive ? vatInTotal(net, rate) : Math.round((net * rate) / 10_000);
+    return { vatPoisha, finalPoisha: vatInclusive ? net : net + vatPoisha };
+  });
+  return {
+    subtotalPoisha,
+    discountPoisha: discount,
+    vatPoisha: result.reduce((a, l) => a + l.vatPoisha, 0),
+    totalPoisha: result.reduce((a, l) => a + l.finalPoisha, 0),
+    lines: result,
+  };
+}
+
+/** Standard EAN-13 check digit. */
+function ean13Valid(code: string) {
+  const sum = [...code.slice(0, 12)].reduce((a, d, i) => a + Number(d) * (i % 2 ? 3 : 1), 0);
+  return (10 - (sum % 10)) % 10 === Number(code[12]);
+}
+
+/** Reads a scale label: PP CCCCC VVVVV K, where V is grams or poisha depending on the scale's setup. */
+export function parseScaleBarcode(code: string, prefix: string) {
+  if (!/^\d{13}$/.test(code) || !code.startsWith(prefix) || !ean13Valid(code)) return null;
+  return { itemCode: code.slice(2, 7), value: Number(code.slice(7, 12)) };
+}
 
 export function computeTotals(
   lines: Pick<SaleLine, "qty" | "unitPricePoisha">[],
@@ -54,14 +98,14 @@ export const saleSchema = z
     tenderedPoisha: poisha,
     paymentRef: z.string().trim().min(1).max(64).nullable(),
     bakiPaidMethod: z.enum(["cash", "bkash", "nagad"]).default("cash"),
-    vatRateBp: z.number().int().min(0).max(10_000).default(0),
+    vatInclusive: z.boolean().default(true),
     vatPoisha: poisha.default(0),
   })
   .superRefine((sale, ctx) => {
-    if (sale.vatPoisha !== vatInTotal(sale.totalPoisha, sale.vatRateBp)) {
+    const totals = computeBill(sale.lines, sale.discountPoisha, sale.vatInclusive);
+    if (sale.vatPoisha !== totals.vatPoisha) {
       ctx.addIssue({ code: "custom", path: ["vatPoisha"], message: "vat_mismatch" });
     }
-    const totals = computeTotals(sale.lines, sale.discountPoisha);
     if (totals.discountPoisha !== sale.discountPoisha) {
       ctx.addIssue({ code: "custom", path: ["discountPoisha"], message: "discount_exceeds_subtotal" });
     }
@@ -84,6 +128,8 @@ export const ROLES = ["owner", "manager", "cashier"] as const;
 export type Role = (typeof ROLES)[number];
 
 export const phoneSchema = z.string().trim().regex(/^01[3-9]\d{8}$/, "invalid_phone");
+/** Login codes go to email first: free to send, and it works on every phone. */
+export const emailSchema = z.string().trim().toLowerCase().max(254).email("invalid_email");
 
 const isSimplePin = (pin: string) => {
   const d = [...pin].map(Number);
@@ -97,15 +143,16 @@ export const pinSchema = z
 
 const staffName = z.string().trim().min(1, "name_required").max(100);
 const staffRole = z.enum(["manager", "cashier"]);
-const phoneRule = { message: "phone_required", path: ["phone"] };
-/** Managers and owners sign new devices in with a code sent to their phone. */
-const hasPhoneIfManager = (s: { role: string; phone: string | null }) => s.role === "cashier" || s.phone !== null;
+const contactRule = { message: "email_required", path: ["email"] };
+/** Managers and owners connect new devices with a code sent to their email (or phone, once SMS is set up). */
+export const hasContactIfManager = (s: { role: string; phone: string | null; email: string | null }) => s.role === "cashier" || s.email !== null || s.phone !== null;
 
 export const staffCreateSchema = z
-  .object({ name: staffName, phone: phoneSchema.nullable(), role: staffRole, pin: pinSchema })
-  .refine(hasPhoneIfManager, phoneRule);
+  .object({ name: staffName, email: emailSchema.nullable(), phone: phoneSchema.nullable(), role: staffRole, pin: pinSchema })
+  .refine(hasContactIfManager, contactRule);
 export const staffUpdateSchema = z.object({
   name: staffName,
+  email: emailSchema.nullable(),
   phone: phoneSchema.nullable(),
   role: staffRole,
   pin: pinSchema.nullable(),
@@ -113,11 +160,21 @@ export const staffUpdateSchema = z.object({
 });
 
 export type StaffMember = { id: string; name: string; role: Role };
-export type StaffRecord = StaffMember & { phone: string | null; disabled: boolean };
-export type DeviceRecord = { id: string; name: string; lastSeenAt: string };
+export type StaffRecord = StaffMember & { email: string | null; phone: string | null; disabled: boolean };
+export type DeviceRecord = { id: string; name: string; lastSeenAt: string; branchId: string };
 export type SignInResponse = { token: string; expiresAt: string; user: StaffMember };
 
 export const CATEGORIES = ["staples", "oil_spice", "drinks", "snacks", "fresh", "home_care"] as const;
+
+/** Another way to sell the same stock, e.g. "Dozen" = 12 pc, or "Sack" = 50 kg, at its own price. */
+export const packSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1, "pack_name_required").max(40),
+  qty: z.number().int().positive("pack_qty_required").max(MAX_QTY),
+  pricePoisha: poisha,
+  barcode: z.string().trim().min(1).max(64).nullable(),
+});
+export type Pack = z.infer<typeof packSchema>;
 
 const productFields = z.object({
   nameEn: z.string().trim().max(200),
@@ -126,7 +183,12 @@ const productFields = z.object({
   pricePoisha: poisha,
   costPoisha: poisha,
   barcode: z.string().trim().min(1).max(64).nullable(),
-  unit: z.enum(UNITS),
+  unit: z.enum(UNITS, { message: "unit_required" }),
+  vatRateBp: z.number().int().min(0).max(10_000).nullable().default(null),
+  /** A variant (size, colour) is its own product with its own stock, shown under its main product. */
+  variantOf: z.string().uuid().nullable().default(null),
+  variantName: z.string().trim().max(60).nullable().default(null),
+  packs: z.array(packSchema).max(10).default([]),
 });
 
 const hasAName = (p: { nameEn: string; nameBn: string }) => p.nameEn.length > 0 || p.nameBn.length > 0;
@@ -134,12 +196,17 @@ const nameRule = { message: "name_required", path: ["nameBn"] };
 
 const stockQty = z.number().int().min(-1_000_000_000).max(1_000_000_000);
 
+const variantNamed = (p: { variantOf: string | null; variantName: string | null }) => !p.variantOf || Boolean(p.variantName);
+const variantRule = { message: "variant_name_required", path: ["variantName"] };
+
 export const productCreateSchema = productFields
   .extend({ openingStock: stockQty.nonnegative() })
-  .refine(hasAName, nameRule);
+  .refine(hasAName, nameRule)
+  .refine(variantNamed, variantRule);
 export const productUpdateSchema = productFields
   .extend({ stockAdjustment: stockQty })
-  .refine(hasAName, nameRule);
+  .refine(hasAName, nameRule)
+  .refine(variantNamed, variantRule);
 export type ProductCreate = z.infer<typeof productCreateSchema>;
 export type ProductUpdate = z.infer<typeof productUpdateSchema>;
 
@@ -186,13 +253,19 @@ export const purchaseCreateSchema = z
     if (totals.subtotalPoisha > MAX_PURCHASE_POISHA) issue("total_too_large");
     if (p.discountPoisha > totals.subtotalPoisha) issue("discount_exceeds_subtotal");
     if (p.paidPoisha > totals.totalPoisha) issue("paid_exceeds_total");
-    if (!p.receiveNow && p.paidPoisha > 0) issue("paid_before_receiving");
     if (p.paidPoisha > 0 && !paymentRefRule(p.paymentMethod, p.paymentRef)) issue("payment_ref_required");
     if (Date.parse(p.purchasedAt) > Date.now() + 24 * 60 * 60_000) issue("bad_date");
   });
 
 export const purchaseReceiveSchema = z
-  .object({ paidPoisha: poisha, paymentMethod, paymentRef })
+  .object({
+    id: z.string().uuid(),
+    /** Leave out to receive everything still outstanding. */
+    lines: z.array(z.object({ lineNo: z.number().int().positive(), qty: z.number().int().positive().max(MAX_QTY) })).max(500).optional(),
+    paidPoisha: poisha,
+    paymentMethod,
+    paymentRef,
+  })
   .refine((p) => p.paidPoisha === 0 || paymentRefRule(p.paymentMethod, p.paymentRef), "payment_ref_required");
 
 export const supplierPaymentSchema = z
@@ -201,15 +274,15 @@ export const supplierPaymentSchema = z
 
 export type SupplierSummary = { id: string; name: string; phone: string | null; address: string | null; duePoisha: number };
 export type SupplierPaymentRecord = { id: string; amountPoisha: number; method: string; ref: string | null; paidAt: string };
-export type SupplierDetail = { supplier: SupplierSummary; payments: SupplierPaymentRecord[] };
-export type PurchaseStatus = "ordered" | "received" | "cancelled" | "voided";
+export type SupplierDetail = { supplier: SupplierSummary; payments: SupplierPaymentRecord[]; hasMore: boolean };
+export type PurchaseStatus = "ordered" | "partial" | "received" | "cancelled" | "voided";
 export type PurchaseSummary = {
   id: string; supplierId: string; supplierName: string; invoiceNo: string | null; purchasedAt: string; status: PurchaseStatus; totalPoisha: number;
 };
 export type PurchaseDetail = PurchaseSummary & {
   discountPoisha: number;
   paidPoisha: number;
-  lines: { lineNo: number; productId: string; nameEn: string; nameBn: string; imageUrl: string | null; qty: number; returnedQty: number; unitCostPoisha: number; unit: Unit }[];
+  lines: { lineNo: number; productId: string; nameEn: string; nameBn: string; imageUrl: string | null; qty: number; receivedQty: number; returnedQty: number; unitCostPoisha: number; unit: Unit }[];
 };
 
 export const customerInputSchema = z.object({
@@ -231,13 +304,13 @@ export const returnCreateSchema = z.object({
   refundRef: z.string().trim().min(1).max(64).nullable(),
 });
 
-/** What returned items are worth, after their share of any discount on the original bill. */
-export function returnValue(qty: number, unitPricePoisha: number, subtotalPoisha: number, totalPoisha: number) {
-  if (subtotalPoisha === 0) return 0;
-  return Number((BigInt(qty) * BigInt(unitPricePoisha) * BigInt(totalPoisha)) / (BigInt(subtotalPoisha) * BigInt(QTY_SCALE)));
+/** What returned items are worth: their share of what that line really cost after discount and VAT. */
+export function returnValue(qty: number, soldQty: number, finalPoisha: number) {
+  if (soldQty === 0) return 0;
+  return Number((BigInt(qty) * BigInt(finalPoisha)) / BigInt(soldQty));
 }
 
-export const OP_KINDS = ["customer_create", "customer_payment", "sale_return", "shift_open", "shift_close"] as const;
+export const OP_KINDS = ["customer_create", "customer_update", "customer_payment", "sale_return", "shift_open", "shift_close"] as const;
 export type OpKind = (typeof OP_KINDS)[number];
 export const syncOpsSchema = z.object({
   ops: z.array(z.object({ id: z.string().uuid(), kind: z.enum(OP_KINDS), actorId: z.string().uuid(), payload: z.unknown() })).min(1).max(50),
@@ -250,7 +323,7 @@ export const shiftCloseSchema = z.object({ id: z.string().uuid(), closedAt: z.st
 export type RecentSale = {
   id: string; receiptNo: string; soldAt: string; totalPoisha: number; tenderedPoisha: number; discountPoisha: number; vatPoisha: number; paymentMethod: string;
   bakiPaidMethod: string; customerId: string | null; cashierName: string | null; returnedPoisha: number; creditedPoisha: number;
-  lines: { lineNo: number; productId: string; name: string; qty: number; unitPricePoisha: number; unit: Unit; returnedQty: number }[];
+  lines: { lineNo: number; productId: string; name: string; qty: number; unitPricePoisha: number; unit: Unit; returnedQty: number; finalPoisha: number }[];
 };
 
 export const purchaseReturnSchema = z.object({
@@ -263,6 +336,7 @@ export type CustomerDetail = {
   customer: CustomerSummary;
   sales: { id: string; receiptNo: string; soldAt: string; totalPoisha: number; paidPoisha: number }[];
   payments: SupplierPaymentRecord[];
+  hasMore: boolean;
 };
 export type SaleListItem = {
   id: string; receiptNo: string; soldAt: string; totalPoisha: number; paymentMethod: string;
@@ -270,7 +344,7 @@ export type SaleListItem = {
 };
 export type SaleDetail = {
   id: string; receiptNo: string; soldAt: string; discountPoisha: number; totalPoisha: number; tenderedPoisha: number; paymentMethod: string;
-  lines: { lineNo: number; productId: string; name: string; nameEn: string; nameBn: string; imageUrl: string | null; qty: number; unitPricePoisha: number; returnedQty: number; unit: Unit }[];
+  lines: { lineNo: number; productId: string; name: string; nameEn: string; nameBn: string; imageUrl: string | null; qty: number; unitPricePoisha: number; returnedQty: number; unit: Unit; finalPoisha: number }[];
 };
 export type ReturnResult = { valuePoisha: number; creditPoisha: number; refundPoisha: number };
 
@@ -289,26 +363,36 @@ export type ReportResponse = {
 
 /** Placeholder prices: change them here before launch. */
 export const PLANS = [
-  { id: "starter", name: "Starter", monthlyPoisha: 49_900, maxDevices: 2 },
-  { id: "growth", name: "Growth", monthlyPoisha: 99_900, maxDevices: 5 },
-  { id: "pro", name: "Pro", monthlyPoisha: 199_900, maxDevices: 15 },
+  { id: "starter", name: "Starter", monthlyPoisha: 49_900, maxDevices: 2, maxBranches: 1, selfServe: true },
+  { id: "growth", name: "Growth", monthlyPoisha: 99_900, maxDevices: 5, maxBranches: 3, selfServe: true },
+  // No longer sold: bigger shops get an Enterprise deal. Kept so stores already on it keep their limits.
+  { id: "pro", name: "Pro", monthlyPoisha: 199_900, maxDevices: 15, maxBranches: 10, selfServe: false },
 ] as const;
 export const planById = (id: string) => PLANS.find((p) => p.id === id);
+/** Plans an owner may pay for in the app: the ones on sale, plus renewing the plan they already have. */
+export const buyablePlans = (currentPlan?: string | null) => PLANS.filter((p) => p.selfServe || p.id === currentPlan);
 export const TRIAL_DAYS = 14;
 export const TRIAL_PLAN = "growth";
 export const GRACE_DAYS = 7;
 
-export type SubscriptionInfo = { plan: string; accessUntil: string; onTrial: boolean };
+export type SubscriptionInfo = { plan: string; accessUntil: string; onTrial: boolean; suspended?: boolean };
 export type SubscriptionStatus = "trial" | "active" | "grace" | "expired";
 
 export function subscriptionState(sub: SubscriptionInfo, now = Date.now()): { status: SubscriptionStatus; daysLeft: number } {
   const until = Date.parse(sub.accessUntil);
   const daysLeft = Math.ceil((until - now) / 86_400_000);
+  if (sub.suspended) return { status: "expired", daysLeft };
   if (now <= until) return { status: sub.onTrial ? "trial" : "active", daysLeft };
   return { status: now <= until + GRACE_DAYS * 86_400_000 ? "grace" : "expired", daysLeft };
 }
 
-const RESERVED_SUBDOMAINS = new Set(["www", "app", "api", "admin", "mail", "static", "cdn", "assets", "billing", "support", "help", "status", "blog", "ftp", "smtp", "root", "signup", "login", "lalcha"]);
+const RESERVED_SUBDOMAINS = new Set([
+  "www", "app", "api", "admin", "mail", "static", "cdn", "assets", "billing", "support", "help", "status", "blog", "ftp", "smtp", "root", "signup", "login", "lalcha", "demo",
+  "pos", "postal", "imap", "pop", "webmail", "mx", "dev", "staging", "test", "docs",
+  // Already used by other services on lalcha.com, so no store may take them.
+  "auth", "authentik", "betaadvisory", "bridge", "carzlynch", "chat", "coolify", "coolifyrecent", "crm", "dcms", "dseblock", "dsemarketinsight", "erp", "fameit",
+  "foxline", "hfc", "invoice", "matrix", "matter", "meet", "n8n", "project", "riot", "robi", "rocket", "turn", "zulip",
+]);
 export const subdomainSchema = z
   .string()
   .regex(/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/, "invalid_subdomain")
@@ -318,13 +402,24 @@ export const signupSchema = z.object({
   storeName: z.string().trim().min(1, "name_required").max(100),
   subdomain: subdomainSchema,
   ownerName: z.string().trim().min(1, "name_required").max(100),
-  phone: phoneSchema,
+  email: emailSchema,
+  phone: phoneSchema.nullable(),
   pin: pinSchema,
   code: z.string().regex(/^\d{6}$/, "invalid_code"),
 });
 
 export const BILLING_METHODS = ["bkash", "nagad"] as const;
 export type BillingMethod = (typeof BILLING_METHODS)[number];
+/** How a subscription was paid. Cash, bank and other are recorded by a superadmin, never by a store. */
+export const SUBSCRIPTION_METHODS = ["bkash", "nagad", "cash", "bank", "other"] as const;
+export type SubscriptionMethod = (typeof SUBSCRIPTION_METHODS)[number];
+export const manualSubscriptionSchema = z.object({
+  plan: z.string().max(20),
+  months: z.number().int().min(1).max(36),
+  method: z.enum(SUBSCRIPTION_METHODS),
+  amountPoisha: z.number().int().nonnegative().max(1_000_000_000),
+  ref: z.string().trim().max(64),
+});
 export const billingPaymentSchema = z.object({
   id: z.string().uuid(),
   plan: z.string().max(20),
@@ -336,9 +431,31 @@ export const billingPaymentSchema = z.object({
 export type BillingResponse = {
   subscription: SubscriptionInfo | null;
   payTo: Record<BillingMethod, string> | null;
-  payments: { id: string; plan: string; months: number; amountPoisha: number; method: BillingMethod; ref: string; status: "pending" | "approved" | "rejected"; createdAt: string }[];
+  payments: { id: string; plan: string; months: number; amountPoisha: number; method: SubscriptionMethod; ref: string; status: "pending" | "approved" | "rejected"; createdAt: string }[];
 };
-export type PlatformStore = { id: string; name: string; subdomain: string; plan: string; owner: string | null; phone: string | null; accessUntil: string | null; status: SubscriptionStatus };
+export type PlatformStore = {
+  id: string; name: string; subdomain: string; plan: string; owner: string | null; phone: string | null; email: string | null; accessUntil: string | null; status: SubscriptionStatus;
+  suspended: boolean; note: string | null; createdAt: string; devices: number; staff: number; salesLast30: number; lastSaleAt: string | null;
+};
+export type PlatformLog = { id: string; actor: string | null; action: string; storeName: string | null; detail: string | null; at: string };
+
+export const branchInputSchema = z.object({ id: z.string().uuid(), name: z.string().trim().min(1, "name_required").max(100), address: z.string().trim().min(1).max(300).nullable() });
+export type BranchRecord = { id: string; name: string; address: string | null };
+export const transferCreateSchema = z
+  .object({
+    id: z.string().uuid(),
+    fromBranchId: z.string().uuid(),
+    toBranchId: z.string().uuid(),
+    lines: z.array(z.object({ productId: z.string().uuid(), qty: z.number().int().positive().max(MAX_QTY) })).min(1, "no_lines").max(500),
+  })
+  .refine((t) => t.fromBranchId !== t.toBranchId, "same_branch")
+  .refine((t) => new Set(t.lines.map((l) => l.productId)).size === t.lines.length, "duplicate_line");
+export type TransferRecord = {
+  id: string; status: "sent" | "received" | "cancelled"; createdAt: string; fromBranchId: string; toBranchId: string; fromName: string; toName: string;
+  lines: { productId: string; nameEn: string; nameBn: string; unit: Unit; qty: number }[];
+};
+export type AuditEntry = { id: string; action: string; entityId: string | null; detail: Record<string, unknown> | null; at: string; actorName: string | null };
+export const importRowsSchema = z.object({ rows: z.array(z.unknown()).min(1).max(500) });
 export type PlatformPayment = {
   id: string; storeId: string; storeName: string; subdomain: string; plan: string; months: number; amountPoisha: number; method: string; ref: string; status: string; createdAt: string;
 };
@@ -360,23 +477,32 @@ export type CatalogProduct = {
   imageUrl: string | null;
   stock: number;
   unit: Unit;
+  vatRateBp: number | null;
+  variantOf: string | null;
+  variantName: string | null;
+  packs: Pack[];
 };
 
 export const storeSettingsSchema = z.object({
   vatEnabled: z.boolean(),
   vatRateBp: z.number().int().min(0).max(10_000),
+  vatInclusive: z.boolean().default(true),
+  scaleEnabled: z.boolean().default(false),
+  scalePrefix: z.string().regex(/^\d{2}$/).default("21"),
+  scaleMode: z.enum(["weight", "price"]).default("weight"),
   bin: z.string().trim().max(30).nullable(),
   address: z.string().trim().max(300).nullable(),
   phone: z.string().trim().max(30).nullable(),
 });
 export type StoreSettings = z.infer<typeof storeSettingsSchema>;
-export const DEFAULT_SETTINGS: StoreSettings = { vatEnabled: false, vatRateBp: 0, bin: null, address: null, phone: null };
+export const DEFAULT_SETTINGS: StoreSettings = { vatEnabled: false, vatRateBp: 0, vatInclusive: true, scaleEnabled: false, scalePrefix: "21", scaleMode: "weight", bin: null, address: null, phone: null };
 
 export type CatalogResponse = {
   store: { name: string };
   products: CatalogProduct[];
   subscription: SubscriptionInfo | null;
   settings: StoreSettings;
+  branch: { id: string; name: string };
 };
 
 export type Lang = "en" | "bn";
@@ -395,9 +521,54 @@ const qtyFormat = {
 const UNIT_LABELS: Record<Unit, Record<Lang, string>> = {
   pc: { en: "", bn: "" },
   kg: { en: "kg", bn: "কেজি" },
+  gram: { en: "g", bn: "গ্রাম" },
   litre: { en: "L", bn: "লিটার" },
+  ml: { en: "ml", bn: "মিলি" },
   metre: { en: "m", bn: "মিটার" },
+  feet: { en: "ft", bn: "ফুট" },
+  yard: { en: "yd", bn: "গজ" },
+  sqft: { en: "sq ft", bn: "বর্গফুট" },
+  dozen: { en: "dozen", bn: "ডজন" },
+  hali: { en: "hali", bn: "হালি" },
+  box: { en: "box", bn: "বক্স" },
+  pack: { en: "pack", bn: "প্যাকেট" },
+  bag: { en: "bag", bn: "বস্তা" },
+};
+/** The unit's full name, for choosing it in a form (pc has no short label on the till). */
+export const UNIT_NAMES: Record<Unit, Record<Lang, string>> = {
+  pc: { en: "Piece (pc)", bn: "পিস" },
+  kg: { en: "Kilogram (kg)", bn: "কেজি" },
+  gram: { en: "Gram (g)", bn: "গ্রাম" },
+  litre: { en: "Litre (L)", bn: "লিটার" },
+  ml: { en: "Millilitre (ml)", bn: "মিলিলিটার" },
+  metre: { en: "Metre (m)", bn: "মিটার" },
+  feet: { en: "Feet (ft)", bn: "ফুট" },
+  yard: { en: "Yard (gaj)", bn: "গজ" },
+  sqft: { en: "Square feet", bn: "বর্গফুট" },
+  dozen: { en: "Dozen", bn: "ডজন" },
+  hali: { en: "Hali (4)", bn: "হালি" },
+  box: { en: "Box", bn: "বক্স" },
+  pack: { en: "Packet", bn: "প্যাকেট" },
+  bag: { en: "Bag / sack", bn: "বস্তা" },
 };
 export const unitLabel = (unit: Unit, lang: Lang) => UNIT_LABELS[unit][lang];
 export const formatQty = (qty: number, unit: Unit, lang: Lang) => `${qtyFormat[lang].format(qty / QTY_SCALE)}${unit === "pc" ? "" : ` ${UNIT_LABELS[unit][lang]}`}`;
 export const formatTaka = (p: number, lang: Lang) => `৳${formatNumber(p / 100, lang)}`;
+
+/** The company inbox in the superadmin panel. */
+export type PlatformMailSummary = {
+  id: string; direction: "in" | "out"; mailbox: string; fromAddress: string; fromName: string | null; toAddress: string;
+  subject: string; preview: string; read: boolean; createdAt: string;
+};
+export type PlatformMail = PlatformMailSummary & {
+  textBody: string; htmlBody: string | null; messageId: string | null; inReplyTo: string | null; attachments: { filename: string; size: number }[]; sentBy: string | null;
+};
+export type MailboxInfo = { name: string; address: string; unread: number };
+export const mailSendSchema = z.object({
+  from: z.string().trim().toLowerCase().max(40),
+  to: z.string().trim().toLowerCase().max(254).email("invalid_email"),
+  subject: z.string().trim().min(1, "subject_required").max(300),
+  text: z.string().trim().min(1, "message_required").max(50_000),
+  /** The message being answered, so the reply threads in the customer's mail app. */
+  replyTo: z.string().uuid().nullable().default(null),
+});

@@ -26,7 +26,7 @@ const secondary = "min-h-14 border-[3px] border-line px-4 text-lg font-black";
 const addButton = "min-h-13 shrink-0 bg-accent px-4 text-lg font-black text-on-accent ring-[3px] ring-line ring-inset disabled:opacity-40";
 const API_ERRORS: StringKey[] = [
   "name_required", "invalid_phone", "duplicate_invoice", "exceeds_due", "paid_exceeds_total", "payment_ref_required", "supplier_has_due",
-  "not_open", "unknown_supplier", "no_lines", "bad_date", "total_too_large", "insufficient_stock", "stock_already_used", "has_returns", "exceeds_sold",
+  "not_open", "unknown_supplier", "no_lines", "bad_date", "total_too_large", "insufficient_stock", "stock_already_used", "has_returns", "exceeds_sold", "exceeds_order",
 ];
 
 const money = (text: string) => (text.trim() === "" ? 0 : Math.round(Number(text) * 100));
@@ -106,12 +106,26 @@ export function PurchaseScreen({
   const [supplierForm, setSupplierForm] = useState<{ supplier: SupplierSummary | null } | null>(null);
   const [openSupplier, setOpenSupplier] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [page, setPage] = useState(1);
+
+  async function more() {
+    const res = await apiFetch(`/v1/purchases?page=${page + 1}`);
+    if (!res.ok) return;
+    const next = (await res.json()) as { purchases: PurchaseSummary[]; hasMore: boolean };
+    setPurchases((c) => [...c, ...next.purchases]);
+    setHasMore(next.hasMore);
+    setPage(page + 1);
+  }
 
   const load = useCallback(async () => {
     try {
       const [p, s] = await Promise.all([apiFetch("/v1/purchases"), apiFetch("/v1/suppliers")]);
       if (!p.ok || !s.ok) throw new Error();
-      setPurchases(((await p.json()) as { purchases: PurchaseSummary[] }).purchases);
+      const firstPage = (await p.json()) as { purchases: PurchaseSummary[]; hasMore: boolean };
+      setPurchases(firstPage.purchases);
+      setHasMore(firstPage.hasMore);
+      setPage(1);
       const list = ((await s.json()) as { suppliers: SupplierSummary[] }).suppliers;
       setSuppliers(list);
       setFailed(false);
@@ -126,11 +140,11 @@ export function PurchaseScreen({
     if (online) void load();
   }, [online, load]);
 
-  const totalDue = suppliers.reduce((sum, s) => sum + s.duePoisha, 0);
+  const totalDue = suppliers.reduce((sum, s) => sum + Math.max(s.duePoisha, 0), 0);
   const afterStockChange = async () => {
     await Promise.all([load(), onChanged()]);
   };
-  const statusKey = { ordered: "statusOrdered", received: "statusReceived", cancelled: "statusCancelled", voided: "statusVoided" } as const;
+  const statusKey = { ordered: "statusOrdered", received: "statusReceived", cancelled: "statusCancelled", voided: "statusVoided", partial: "statusPartial" } as const;
 
   return (
     <main className="no-print min-h-0 flex-1 overflow-y-auto p-3">
@@ -163,12 +177,13 @@ export function PurchaseScreen({
                     </span>
                     <span className="shrink-0 text-right">
                       <span className="block text-xl font-black">{formatTaka(p.totalPoisha, lang)}</span>
-                      <span className={`block text-sm font-bold ${p.status === "ordered" ? "text-hot" : "text-muted"}`}>{t(statusKey[p.status])}</span>
+                      <span className={`block text-sm font-bold ${p.status === "ordered" || p.status === "partial" ? "text-hot" : "text-muted"}`}>{t(statusKey[p.status])}</span>
                     </span>
                   </button>
                 </li>
               ))}
             </ul>
+            {hasMore && <button className="min-h-12 w-full border-[3px] border-line font-black" onClick={() => void more()}>{t("loadMore")}</button>}
           </>
         ) : (
           <>
@@ -189,8 +204,8 @@ export function PurchaseScreen({
                       <span className="block font-bold text-muted">{s.phone ?? "—"}</span>
                     </span>
                     <span className="shrink-0 text-right">
-                      <span className={`block text-xl font-black ${s.duePoisha > 0 ? "text-hot" : ""}`}>{formatTaka(s.duePoisha, lang)}</span>
-                      <span className="block text-sm font-bold text-muted">{t("due")}</span>
+                      <span className={`block text-xl font-black ${s.duePoisha > 0 ? "text-hot" : ""}`}>{formatTaka(Math.abs(s.duePoisha), lang)}</span>
+                      <span className="block text-sm font-bold text-muted">{s.duePoisha < 0 ? t("advance") : t("due")}</span>
                     </span>
                   </button>
                 </li>
@@ -286,7 +301,7 @@ function NewPurchase({
   const payload = lines.map((l) => ({ productId: l.product.id, qty: Math.round(Number(l.qty || 0) * QTY_SCALE), unitCostPoisha: money(l.cost) }));
   const totals = computeTotals(payload.map((l) => ({ qty: l.qty, unitPricePoisha: l.unitCostPoisha })), money(discount));
   const validLines = lines.length > 0 && payload.every((l) => Number.isInteger(l.qty) && l.qty > 0 && Number.isFinite(l.unitCostPoisha));
-  const paidPoisha = receiveNow ? money(paid) : 0;
+  const paidPoisha = money(paid);
 
   async function createSupplier() {
     if (!quickSupplier?.trim() || busy) return;
@@ -425,15 +440,13 @@ function NewPurchase({
         <input type="checkbox" checked={receiveNow} onChange={(e) => setReceiveNow(e.target.checked)} className="h-6 w-6" />
         {t("receiveNow")}
       </label>
-      {receiveNow && (
-        <>
+      <>
           <PaymentFields t={t} lang={lang} paid={paid} setPaid={setPaid} method={method} setMethod={setMethod} reference={reference} setReference={setReference} full={totals.totalPoisha} />
           <div className="flex justify-between text-xl font-black">
             <span>{t("due")}</span>
             <span className={paidPoisha > totals.totalPoisha ? "text-hot" : ""}>{formatTaka(Math.max(totals.totalPoisha - paidPoisha, 0), lang)}</span>
           </div>
-        </>
-      )}
+      </>
       {error && <p role="alert" className="font-bold text-hot">{error}</p>}
       <div className="flex gap-2">
         <button type="button" className={`${secondary} flex-1`} onClick={onClose}>{t("cancel")}</button>
@@ -450,6 +463,9 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
   const [reference, setReference] = useState("");
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmVoid, setConfirmVoid] = useState(false);
+  const [arriving, setArriving] = useState<Record<number, string>>({});
+  const receiptId = useRef(uuidv7());
+  const [confirmClose, setConfirmClose] = useState(false);
   const [back, setBack] = useState<Record<number, string>>({});
   const returnId = useRef(uuidv7());
   const [error, setError] = useState("");
@@ -492,10 +508,10 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
             {detail.lines.map((l) => (
               <li key={l.productId} className="flex items-center gap-3 border-b-2 border-line/20 py-2">
                 <span className="relative h-12 w-12 shrink-0 bg-tile">
-                  <ProductImage product={{ ...l, id: l.productId, sku: "", barcode: null, category: "", pricePoisha: 0, stock: 0 }} lang={lang} />
+                  <ProductImage product={l} lang={lang} />
                 </span>
                 <span className="min-w-0 flex-1 truncate font-bold">{name(l, lang)}</span>
-                <span className="font-bold">{formatQty(l.qty, l.unit, lang)} × {formatTaka(l.unitCostPoisha, lang)}</span>
+                <span className="font-bold">{l.receivedQty !== l.qty && detail.status !== "ordered" ? `${formatQty(l.receivedQty, l.unit, lang)} / ` : ""}{formatQty(l.qty, l.unit, lang)} × {formatTaka(l.unitCostPoisha, lang)}</span>
                 <span className="w-24 text-right font-black">{formatTaka(lineAmount(l.qty, l.unitCostPoisha), lang)}</span>
               </li>
             ))}
@@ -507,11 +523,11 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
           {detail.status === "received" && (
             <div className="flex justify-between font-bold"><span>{t("paidAtPurchase")}</span><span>{formatTaka(detail.paidPoisha, lang)}</span></div>
           )}
-          {detail.status === "received" && (
+          {(detail.status === "received" || detail.status === "partial") && (
             <section className="space-y-2 border-t-[3px] border-line pt-3">
               <h3 className="text-lg font-black">{t("returnToSupplier")}</h3>
               {detail.lines.map((l) => {
-                const left = l.qty - l.returnedQty;
+                const left = l.receivedQty - l.returnedQty;
                 return (
                   <label key={l.lineNo} className="flex items-center justify-between gap-3 font-bold">
                     <span className="min-w-0 truncate">{name(l, lang)} · {formatQty(left, l.unit, lang)}</span>
@@ -536,19 +552,43 @@ function PurchaseView({ id, lang, t, onClose, onChanged }: { id: string; lang: L
               </button>
             </section>
           )}
-          {detail.status === "ordered" && (
+          {(detail.status === "ordered" || detail.status === "partial") && (
             <>
+              <h3 className="text-lg font-black">{t("arrivedNow")}</h3>
+              {detail.lines.filter((l) => l.qty > l.receivedQty).map((l) => (
+                <label key={l.lineNo} className="flex items-center justify-between gap-3 font-bold">
+                  <span className="min-w-0 truncate">{name(l, lang)} · {formatQty(l.qty - l.receivedQty, l.unit, lang)}</span>
+                  <input aria-label={`${t("arrivedNow")}: ${name(l, lang)}`} inputMode="decimal" value={arriving[l.lineNo] ?? String((l.qty - l.receivedQty) / QTY_SCALE)} onChange={(e) => setArriving((a) => ({ ...a, [l.lineNo]: digits(e.target.value) }))} className="h-12 w-24 border-[3px] border-line bg-bg px-2 text-right font-black" />
+                </label>
+              ))}
               <PaymentFields t={t} lang={lang} paid={paid} setPaid={setPaid} method={method} setMethod={setMethod} reference={reference} setReference={setReference} full={detail.totalPoisha} />
-              <button disabled={busy} className={`${primary} w-full`} onClick={() => void act(`/v1/purchases/${id}/receive`, { paidPoisha: money(paid), paymentMethod: method, paymentRef: reference.trim() || null })}>
+              <button disabled={busy} className={`${primary} w-full`} onClick={() =>
+                  void act(`/v1/purchases/${id}/receive`, {
+                    id: receiptId.current,
+                    lines: detail.lines
+                      .filter((l) => l.qty > l.receivedQty)
+                      .map((l) => ({ lineNo: l.lineNo, qty: Math.round(Number(arriving[l.lineNo] ?? (l.qty - l.receivedQty) / QTY_SCALE) * QTY_SCALE) }))
+                      .filter((l) => l.qty > 0),
+                    paidPoisha: money(paid),
+                    paymentMethod: method,
+                    paymentRef: reference.trim() || null,
+                  })
+                }>
                 {t("receiveGoods")}
               </button>
-              <button
-                disabled={busy}
-                className="min-h-11 w-full font-bold text-hot underline"
-                onClick={() => (confirmCancel ? void act(`/v1/purchases/${id}/cancel`, {}) : setConfirmCancel(true))}
-              >
-                {confirmCancel ? t("archiveConfirm") : t("cancelOrder")}
-              </button>
+              {detail.status === "ordered" ? (
+                <button
+                  disabled={busy}
+                  className="min-h-11 w-full font-bold text-hot underline"
+                  onClick={() => (confirmCancel ? void act(`/v1/purchases/${id}/cancel`, {}) : setConfirmCancel(true))}
+                >
+                  {confirmCancel ? t("archiveConfirm") : t("cancelOrder")}
+                </button>
+              ) : (
+                <button disabled={busy} className="min-h-11 w-full font-bold text-hot underline" onClick={() => (confirmClose ? void act(`/v1/purchases/${id}/close`, {}) : setConfirmClose(true))}>
+                  {confirmClose ? t("archiveConfirm") : t("closeShort")}
+                </button>
+              )}
             </>
           )}
         </>
@@ -619,12 +659,22 @@ function SupplierView({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const paymentId = useRef(uuidv7());
+  const [page, setPage] = useState(1);
 
   const load = useCallback(async () => {
     const r = await apiFetch(`/v1/suppliers/${id}`);
     if (!r.ok) throw new Error();
     setDetail((await r.json()) as SupplierDetail);
+    setPage(1);
   }, [id]);
+
+  async function more() {
+    const r = await apiFetch(`/v1/suppliers/${id}?page=${page + 1}`);
+    if (!r.ok) return;
+    const next = (await r.json()) as SupplierDetail;
+    setDetail((d) => (d ? { ...next, payments: [...d.payments, ...next.payments] } : next));
+    setPage(page + 1);
+  }
 
   useEffect(() => {
     load().catch(() => setError(t("saveFailed")));
@@ -653,12 +703,13 @@ function SupplierView({
         <>
           <p className="font-bold text-muted">{[supplier.phone, supplier.address].filter(Boolean).join(" · ") || "—"}</p>
           <div className="flex items-end justify-between bg-accent p-3 text-on-accent">
-            <span className="text-lg font-black">{t("due")}</span>
-            <span data-testid="supplier-due" className="text-4xl font-black">{formatTaka(supplier.duePoisha, lang)}</span>
+            <span className="text-lg font-black">{supplier.duePoisha < 0 ? t("advance") : t("due")}</span>
+            <span data-testid="supplier-due" className="text-4xl font-black">{formatTaka(Math.abs(supplier.duePoisha), lang)}</span>
           </div>
-          {supplier.duePoisha > 0 && (
+          {(
             <>
-              <PaymentFields t={t} lang={lang} paid={amount} setPaid={setAmount} method={method} setMethod={setMethod} reference={reference} setReference={setReference} full={supplier.duePoisha} />
+              <PaymentFields t={t} lang={lang} paid={amount} setPaid={setAmount} method={method} setMethod={setMethod} reference={reference} setReference={setReference} full={Math.max(supplier.duePoisha, 0)} />
+              {money(amount) > Math.max(supplier.duePoisha, 0) && <p data-testid="advance-note" className="font-bold text-muted">{t("advanceNote")}</p>}
               <button disabled={busy || money(amount) <= 0} className={`${primary} w-full`} onClick={() => void pay()}>{t("recordPayment")}</button>
             </>
           )}
@@ -673,6 +724,7 @@ function SupplierView({
                   </li>
                 ))}
               </ul>
+              {detail.hasMore && <button className={`${secondary} w-full`} onClick={() => void more()}>{t("loadMore")}</button>}
             </>
           )}
         </>

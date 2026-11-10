@@ -83,3 +83,66 @@ export function download(blob: Blob, fileName: string) {
   a.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
+
+/** Reads the first sheet of an .xlsx file using the browser's own decompression. */
+export async function readFirstSheet(file: Blob): Promise<string[][]> {
+  const buffer = new Uint8Array(await file.arrayBuffer());
+  const view = new DataView(buffer.buffer);
+  let end = buffer.length - 22;
+  while (end >= 0 && view.getUint32(end, true) !== 0x06054b50) end--;
+  if (end < 0) throw new Error("not a workbook");
+  const count = view.getUint16(end + 10, true);
+  let at = view.getUint32(end + 16, true);
+  const decoder = new TextDecoder();
+  const entries = new Map<string, () => Promise<string>>();
+  for (let i = 0; i < count; i++) {
+    const method = view.getUint16(at + 10, true);
+    const size = view.getUint32(at + 20, true);
+    const nameLength = view.getUint16(at + 28, true);
+    const extra = view.getUint16(at + 30, true);
+    const comment = view.getUint16(at + 32, true);
+    const offset = view.getUint32(at + 42, true);
+    const name = decoder.decode(buffer.subarray(at + 46, at + 46 + nameLength));
+    entries.set(name, async () => {
+      const start = offset + 30 + view.getUint16(offset + 26, true) + view.getUint16(offset + 28, true);
+      const raw = buffer.slice(start, start + size);
+      if (method === 0) return decoder.decode(raw);
+      return new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).text();
+    });
+    at += 46 + nameLength + extra + comment;
+  }
+  const parse = (text: string) => new DOMParser().parseFromString(text, "application/xml");
+  const sharedFile = entries.get("xl/sharedStrings.xml");
+  const shared = sharedFile ? [...parse(await sharedFile()).getElementsByTagName("si")].map((si) => si.textContent ?? "") : [];
+  const sheetFile = entries.get("xl/worksheets/sheet1.xml");
+  if (!sheetFile) throw new Error("no sheet");
+  const columnIndex = (ref: string) => [...ref.replace(/\d/g, "")].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+  return [...parse(await sheetFile()).getElementsByTagName("row")].map((row) => {
+    const cells: string[] = [];
+    for (const cell of row.getElementsByTagName("c")) {
+      const type = cell.getAttribute("t");
+      const value = cell.getElementsByTagName("v")[0]?.textContent ?? "";
+      cells[columnIndex(cell.getAttribute("r") ?? "A")] = type === "s" ? (shared[Number(value)] ?? "") : type === "inlineStr" ? (cell.textContent ?? "") : value;
+    }
+    return Array.from(cells, (c) => c ?? "");
+  });
+}
+
+export function readCsv(text: string): string[][] {
+  const rows: string[][] = [[]];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ",") { rows[rows.length - 1].push(cell); cell = ""; }
+    else if (ch === "\n") { rows[rows.length - 1].push(cell.replace(/\r$/, "")); cell = ""; rows.push([]); }
+    else cell += ch;
+  }
+  rows[rows.length - 1].push(cell);
+  return rows.filter((r) => r.some((c) => c.trim() !== ""));
+}

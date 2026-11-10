@@ -29,10 +29,13 @@ export type Statement = { sql: string; bind?: (string | number | null)[] };
 
 const ready = (async () => {
   const sqlite3 = await sqlite3InitModule();
-  const pool = await sqlite3.installOpfsSAHPoolVfs({ name: "lalcha-pos" });
-  const db = new pool.OpfsSAHPoolDb("/pos.sqlite3");
+  // The public demo keeps nothing between visits, and on-device storage allows only one tab at a time,
+  // so the demo in the homepage frame and the full-screen demo in another tab must not share it.
+  const db = self.location.hostname.startsWith("demo.")
+    ? new sqlite3.oo1.DB(":memory:")
+    : new (await sqlite3.installOpfsSAHPoolVfs({ name: "lalcha-pos" })).OpfsSAHPoolDb("/pos.sqlite3");
   db.exec(SCHEMA);
-  for (const change of ["ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'pc'", "ALTER TABLE customers ADD COLUMN credit_limit_poisha INTEGER"]) {
+  for (const change of ["ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'pc'", "ALTER TABLE customers ADD COLUMN credit_limit_poisha INTEGER", "ALTER TABLE products ADD COLUMN vat_rate_bp INTEGER", "ALTER TABLE products ADD COLUMN variant_of TEXT", "ALTER TABLE products ADD COLUMN variant_name TEXT", "ALTER TABLE products ADD COLUMN packs TEXT NOT NULL DEFAULT '[]'"]) {
     try {
       db.exec(change);
     } catch {

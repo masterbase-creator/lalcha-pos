@@ -1,5 +1,7 @@
 import {
+  computeBill,
   computeTotals,
+  parseScaleBarcode,
   formatNumber,
   formatTaka,
   PAYMENT_METHODS,
@@ -16,14 +18,15 @@ import {
   lineAmount,
   QTY_SCALE,
   unitLabel,
-  vatInTotal,
   type StoreSettings,
   type Sale,
 } from "@lalcha/domain";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { strings, type StringKey } from "./i18n";
 import { ShiftDialog } from "./ShiftDialog";
-import { addLocalCustomer, getStoreName, loadCustomers, loadProducts, loadSettings, loadSubscription, recordSale } from "./local";
+import { AuditScreen } from "./AuditScreen";
+import { BranchesScreen } from "./BranchesScreen";
+import { addLocalCustomer, getStoreName, loadBranchName, loadCustomers, loadProducts, loadSettings, loadSubscription, recordSale } from "./local";
 import { SettingsScreen } from "./SettingsScreen";
 import { BillingScreen } from "./BillingScreen";
 import { BakiScreen } from "./BakiScreen";
@@ -37,17 +40,22 @@ import { getAuth, lock, type CurrentUser } from "./session";
 import { PurchaseScreen } from "./PurchaseScreen";
 import { StaffScreen } from "./StaffScreen";
 import { getSyncState, refreshQueueCounts, subscribeSync, syncFresh, syncNow } from "./sync";
+import { groupTiles, isPack, toSellables, type Sellable } from "./sellables";
 
-type CartLine = { product: CatalogProduct; qty: number };
+type CartLine = { product: Sellable; qty: number };
 
-type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "staff" | "billing" | "settings";
-const MANAGER_VIEWS: View[] = ["sell", "products", "purchase", "baki", "returns", "reports", "staff"];
+type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "branches" | "audit" | "staff" | "billing" | "settings";
+const MANAGER_VIEWS: View[] = ["sell", "products", "purchase", "baki", "returns", "reports", "branches", "audit", "staff"];
 const CASHIER_VIEWS: View[] = ["sell", "baki"];
+/** Shown inside another page, such as the demo on the website: grabbing focus there would scroll that page. */
+const EMBEDDED = window.self !== window.top;
 
-export function App({ user }: { user: CurrentUser }) {
+export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean }) {
   const [lang, setLang] = useState<Lang>(() => saved<Lang>("lang", "bn"));
-  const [theme, setTheme] = useState(() => saved<string>("theme", "light"));
-  const [products, setProducts] = useState<CatalogProduct[] | null>(null);
+  const [theme, setTheme] = useState(() => saved<string>("ui-theme", "light"));
+  const [products, setProducts] = useState<Sellable[] | null>(null);
+  /** A tile with variants or packs asks which one before adding it. */
+  const [choosing, setChoosing] = useState<{ title: Sellable; options: Sellable[] } | null>(null);
   const [storeName, setStoreName] = useState("");
   const [dbFailed, setDbFailed] = useState(false);
   const [query, setQuery] = useState("");
@@ -61,8 +69,9 @@ export function App({ user }: { user: CurrentUser }) {
   const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
   const [settings, setSettings] = useState<StoreSettings>(DEFAULT_SETTINGS);
   const [shiftOpen, setShiftOpen] = useState(false);
+  const [branchName, setBranchName] = useState("");
   const [dataVersion, setDataVersion] = useState(0);
-  const [weighing, setWeighing] = useState<{ product: CatalogProduct; qty: number | null } | null>(null);
+  const [weighing, setWeighing] = useState<{ product: Sellable; qty: number | null } | null>(null);
   const [receipt, setReceipt] = useState<Sale | null>(null);
   const [notice, setNotice] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -73,7 +82,7 @@ export function App({ user }: { user: CurrentUser }) {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    remember("theme", theme);
+    remember("ui-theme", theme);
   }, [theme]);
   useEffect(() => {
     document.documentElement.lang = lang;
@@ -82,11 +91,12 @@ export function App({ user }: { user: CurrentUser }) {
 
   const reload = useCallback(async () => {
     try {
-      const [items, store, people, sub, shop] = await Promise.all([loadProducts(), getStoreName(), loadCustomers(), loadSubscription(), loadSettings()]);
+      const [items, store, people, sub, shop, branch] = await Promise.all([loadProducts(), getStoreName(), loadCustomers(), loadSubscription(), loadSettings(), loadBranchName()]);
+      setBranchName(branch);
       setSettings(shop);
       setDataVersion((v) => v + 1);
       setSubscription(sub);
-      setProducts(items);
+      setProducts(toSellables(items));
       setCustomers(people);
       setStoreName(store);
       setDbFailed(false);
@@ -109,7 +119,7 @@ export function App({ user }: { user: CurrentUser }) {
     if (!canManage) setView((v) => (CASHIER_VIEWS.includes(v) ? v : "sell"));
   }, [canManage]);
 
-  const add = useCallback((product: CatalogProduct) => {
+  const add = useCallback((product: Sellable) => {
     if (isLoose(product.unit)) {
       setWeighing({ product, qty: null });
       return;
@@ -121,7 +131,7 @@ export function App({ user }: { user: CurrentUser }) {
     });
   }, []);
 
-  function setLooseQty(product: CatalogProduct, qty: number) {
+  function setLooseQty(product: Sellable, qty: number) {
     setCart((c) => (c.some((l) => l.product.id === product.id) ? c.map((l) => (l.product.id === product.id ? { ...l, qty } : l)) : [{ product, qty }, ...c]));
     setWeighing(null);
   }
@@ -133,6 +143,14 @@ export function App({ user }: { user: CurrentUser }) {
   const scan = useCallback(
     (code: string) => {
       const match = products?.find((p) => p.barcode === code || p.sku.toLowerCase() === code.toLowerCase());
+      const label = !match && settings.scaleEnabled ? parseScaleBarcode(code, settings.scalePrefix) : null;
+      const scaled = label && products?.find((p) => (p.barcode ?? "").replace(/^0+/, "") === label.itemCode.replace(/^0+/, ""));
+      if (label && scaled) {
+        const qty = settings.scaleMode === "weight" ? label.value : Math.round((label.value * QTY_SCALE) / scaled.pricePoisha);
+        setCart((c) => (c.some((l) => l.product.id === scaled.id) ? c.map((l) => (l.product.id === scaled.id ? { ...l, qty: l.qty + qty } : l)) : [{ product: scaled, qty }, ...c]));
+        setNotice("");
+        return true;
+      }
       if (match) {
         add(match);
         setNotice("");
@@ -141,7 +159,7 @@ export function App({ user }: { user: CurrentUser }) {
       }
       return Boolean(match);
     },
-    [products, add, t],
+    [products, add, t, settings],
   );
 
   // Barcode scanners type quickly and press Enter, and must work even when the search box isn't selected.
@@ -169,16 +187,32 @@ export function App({ user }: { user: CurrentUser }) {
   const categories = useMemo(() => ["all", ...new Set(products?.map((p) => p.category))], [products]);
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Packs aren't tiles of their own: they appear when their product's tile is tapped.
     return (products ?? []).filter(
       (p) =>
+        !isPack(p) &&
         (category === "all" || p.category === category) &&
         (!q || [p.nameEn, p.nameBn, p.sku, p.barcode ?? ""].some((v) => v.toLowerCase().includes(q))),
     );
   }, [products, query, category]);
+  const tiles = useMemo(
+    () =>
+      groupTiles(visible).map((g) => {
+        // The main product and its packs first, then each variant with its packs.
+        const options = (products ?? []).filter((p) => p.groupKey === g.main.groupKey);
+        return { main: g.main, options: [...options.filter((o) => o.baseId === g.main.baseId), ...options.filter((o) => o.baseId !== g.main.baseId)] };
+      }),
+    [visible, products],
+  );
+  function tapTile(tile: { main: Sellable; options: Sellable[] }) {
+    if (tile.options.length === 1) add(tile.main);
+    else setChoosing({ title: tile.main, options: tile.options });
+  }
 
-  const lines = cart.map((l) => ({ qty: l.qty, unitPricePoisha: l.product.pricePoisha }));
+  const rateOf = (p: CatalogProduct) => (settings.vatEnabled ? (p.vatRateBp ?? settings.vatRateBp) : 0);
+  const lines = cart.map((l) => ({ qty: l.qty, unitPricePoisha: l.product.pricePoisha, vatRateBp: rateOf(l.product) }));
   const discountInput = Math.round(Number(discountText || 0) * 100);
-  const totals = computeTotals(lines, Number.isFinite(discountInput) ? discountInput : 0);
+  const totals = computeBill(lines, Number.isFinite(discountInput) ? discountInput : 0, settings.vatInclusive);
   const count = cart.reduce((n, l) => n + (isLoose(l.product.unit) ? 1 : l.qty / QTY_SCALE), 0);
 
   function onSearchEnter() {
@@ -200,7 +234,7 @@ export function App({ user }: { user: CurrentUser }) {
     setPaying(false);
     setCartOpen(false);
     setQuery("");
-    searchRef.current?.focus();
+    searchRef.current?.focus({ preventScroll: true });
   }
 
   /** Shows queued work at once. Delivery happens in the background whenever a connection exists. */
@@ -224,14 +258,17 @@ export function App({ user }: { user: CurrentUser }) {
       customerId,
       bakiPaidMethod,
       lines: cart.map((l) => ({
-        productId: l.product.id,
+        productId: l.product.baseId,
         name: name(l.product, lang),
         qty: l.qty,
         unitPricePoisha: l.product.pricePoisha,
         unit: l.product.unit,
+        vatRateBp: rateOf(l.product),
+        packQty: l.product.packQty,
+        packName: l.product.packName,
       })),
-      vatRateBp: settings.vatEnabled ? settings.vatRateBp : 0,
-      vatPoisha: settings.vatEnabled ? vatInTotal(totals.totalPoisha, settings.vatRateBp) : 0,
+      vatInclusive: settings.vatInclusive,
+      vatPoisha: totals.vatPoisha,
       discountPoisha: totals.discountPoisha,
       totalPoisha: totals.totalPoisha,
       paymentMethod: method,
@@ -251,12 +288,12 @@ export function App({ user }: { user: CurrentUser }) {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="no-print flex items-center gap-3 bg-[#12130f] px-4 py-2.5 text-[#f6f3e7]">
-        <span className="bg-accent px-2 py-0.5 text-lg font-black text-on-accent">Lalcha</span>
-        <span className="truncate font-bold">{storeName}</span>
+      <header className="no-print flex items-center gap-3 border-b-[3px] border-line bg-panel px-4 py-2.5 text-text">
+        <span className="flex items-center gap-2 text-lg font-black"><img src="/icon.svg" alt="" width={30} height={30} className="shrink-0" />Lalcha</span>
+        <span className="truncate font-bold">{storeName}{branchName ? ` · ${branchName}` : ""}</span>
         <div className="ml-auto flex items-center gap-2 text-sm font-bold">
           <span className="flex items-center gap-1.5" role="status" data-testid="sync-status">
-            <span className={`h-2.5 w-2.5 rounded-full ${sync.online ? "bg-accent" : "bg-[#ff7a52]"}`} />
+            <span className={`h-2.5 w-2.5 rounded-full ${sync.online ? "bg-[#1f7a55]" : "bg-[#d9360b]"}`} />
             <span className="hidden sm:inline">{sync.online ? t("online") : t("offline")}</span>
           </span>
           {sync.pending > 0 && (
@@ -265,20 +302,24 @@ export function App({ user }: { user: CurrentUser }) {
             </span>
           )}
           {sync.rejected > 0 && (
-            <span className="bg-white px-2 py-0.5 text-[#b02a07]">
+            <span className="bg-hot px-2 py-0.5 text-white">
               {formatNumber(sync.rejected, lang)} {t("failed")}
             </span>
           )}
-          <button data-testid="shift-button" className="min-h-9 border border-white/40 px-3" onClick={() => setShiftOpen(true)}>{t("shift")}</button>
-          <button aria-label={t("lockScreen")} title={user.name} className="min-h-9 border border-white/40 px-3" onClick={lock}>
-            🔒 <span className="hidden sm:inline">{user.name}</span>
-          </button>
-          <button className="min-h-9 border border-white/40 px-3" onClick={() => setLang(lang === "bn" ? "en" : "bn")}>
+          <button data-testid="shift-button" className="min-h-9 border-2 border-line px-3" onClick={() => setShiftOpen(true)}>{t("shift")}</button>
+          {demo ? (
+            <span className="hidden min-h-9 items-center px-1 sm:flex">{user.name}</span>
+          ) : (
+            <button aria-label={t("lockScreen")} title={user.name} className="min-h-9 border-2 border-line px-3" onClick={lock}>
+              🔒 <span className="hidden sm:inline">{user.name}</span>
+            </button>
+          )}
+          <button className="min-h-9 border-2 border-line px-3" onClick={() => setLang(lang === "bn" ? "en" : "bn")}>
             {lang === "bn" ? "EN" : "বাং"}
           </button>
           <button
             aria-label="Toggle dark mode"
-            className="min-h-9 border border-white/40 px-3"
+            className="min-h-9 border-2 border-line px-3"
             onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
           >
             {theme === "dark" ? "☀" : "☾"}
@@ -307,7 +348,11 @@ export function App({ user }: { user: CurrentUser }) {
           )}
         </div>
       )}
-      {view === "settings" ? (
+      {view === "branches" ? (
+        <BranchesScreen products={products ?? []} user={user} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
+      ) : view === "audit" ? (
+        <AuditScreen lang={lang} t={t} online={sync.online} />
+      ) : view === "settings" ? (
         <SettingsScreen settings={settings} t={t} online={sync.online} onChanged={syncFresh} />
       ) : view === "billing" ? (
         <BillingScreen lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
@@ -326,14 +371,14 @@ export function App({ user }: { user: CurrentUser }) {
       ) : view === "staff" ? (
         <StaffScreen user={user} lang={lang} t={t} online={sync.online} />
       ) : view === "products" ? (
-        <ProductsScreen products={products ?? []} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
+        <ProductsScreen products={(products ?? []).filter((p) => !isPack(p))} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : (
       <div className="flex min-h-0 flex-1">
         <main className="no-print flex min-w-0 flex-1 flex-col">
           <div className="space-y-2 p-3 pb-2">
             <input
               ref={searchRef}
-              autoFocus
+              autoFocus={!EMBEDDED}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -369,27 +414,35 @@ export function App({ user }: { user: CurrentUser }) {
               <p className="p-10 text-center text-xl font-bold text-muted">{t("noResults")}</p>
             ) : (
               <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-                {visible.map((p) => {
-                  const inCart = cart.find((l) => l.product.id === p.id)?.qty ?? 0;
+                {tiles.map((tile) => {
+                  const p = tile.main;
+                  const many = tile.options.length > 1;
+                  const inGroup = cart.filter((l) => l.product.groupKey === p.groupKey);
+                  const inCart = many ? inGroup.length * QTY_SCALE : (inGroup[0]?.qty ?? 0);
+                  const lowest = Math.min(...tile.options.map((o) => o.pricePoisha));
                   return (
                     <button
                       key={p.id}
-                      onClick={() => add(p)}
+                      onClick={() => tapTile(tile)}
                       className={`tile-press relative flex flex-col overflow-hidden border-[3px] bg-panel text-left ${
                         inCart ? "border-hot" : "border-line"
                       }`}
                     >
                       {inCart > 0 && (
                         <span className="absolute right-0 top-0 z-10 bg-hot px-2.5 py-1 text-lg font-black text-white">
-                          {formatQty(inCart, p.unit, lang)}
+                          {formatQty(inCart, many ? "pc" : p.unit, lang)}
                         </span>
                       )}
                       <div className="relative aspect-[4/3] w-full bg-tile">
                         <ProductImage product={p} lang={lang} />
                       </div>
                       <div className="flex flex-1 flex-col gap-1 border-t-[3px] border-line p-2.5">
-                        <span className="line-clamp-2 min-h-11 leading-snug font-bold">{name(p, lang)}</span>
-                        <span className="text-2xl leading-none font-black">{money(p.pricePoisha)}{isLoose(p.unit) ? <span className="text-base">/{unitLabel(p.unit, lang)}</span> : null}</span>
+                        <span className="line-clamp-2 min-h-11 leading-snug font-bold">{many ? (lang === "bn" ? p.plainBn : p.plainEn) : name(p, lang)}</span>
+                        {many ? (
+                          <span className="text-2xl leading-none font-black"><span className="text-base">{t("from")} </span>{money(lowest)}<span className="block pt-1 text-sm text-muted">{formatNumber(tile.options.length, lang)} {t("options")}</span></span>
+                        ) : (
+                          <span className="text-2xl leading-none font-black">{money(p.pricePoisha)}{isLoose(p.unit) ? <span className="text-base">/{unitLabel(p.unit, lang)}</span> : null}</span>
+                        )}
                         <span className={`text-sm font-bold ${p.stock <= 5 * QTY_SCALE ? "text-hot" : "text-muted"}`}>
                           {p.stock <= 0
                             ? t("out")
@@ -485,6 +538,12 @@ export function App({ user }: { user: CurrentUser }) {
               />
             </label>
           </div>
+          {totals.vatPoisha > 0 && (
+            <div className="flex justify-between border-t-2 border-line/20 p-3 font-bold">
+              <span>{settings.vatInclusive ? t("vatIncluded") : t("vatAdded")}</span>
+              <span data-testid="cart-vat">{money(totals.vatPoisha)}</span>
+            </div>
+          )}
           <div className="bg-accent p-3 text-on-accent">
             <div className="flex items-end justify-between">
               <span className="text-lg font-black">{t("total")}</span>
@@ -515,6 +574,32 @@ export function App({ user }: { user: CurrentUser }) {
       )}
 
       {shiftOpen && <ShiftDialog lang={lang} t={t} onClose={() => { setShiftOpen(false); void refreshQueueCounts(); void syncNow(); }} />}
+      {choosing && (
+        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/60 sm:items-center" role="dialog" aria-modal="true" aria-label={lang === "bn" ? choosing.title.plainBn : choosing.title.plainEn} onClick={() => setChoosing(null)}>
+          <div className="max-h-full w-full max-w-md overflow-y-auto border-[3px] border-line bg-panel p-4" onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-3 text-2xl font-black">{lang === "bn" ? choosing.title.plainBn : choosing.title.plainEn}</h2>
+            <div className="grid gap-2">
+              {choosing.options.map((o) => (
+                <button
+                  key={o.id}
+                  className="tile-press flex min-h-16 items-center justify-between gap-3 border-[3px] border-line bg-bg px-3 text-left"
+                  onClick={() => {
+                    setChoosing(null);
+                    add(o);
+                  }}
+                >
+                  <span>
+                    <span className="block text-lg font-black">{o.packName ?? o.variantName ?? (unitLabel(o.unit, lang) || t("onePiece"))}</span>
+                    <span className={`block text-sm font-bold ${o.stock <= 0 ? "text-hot" : "text-muted"}`}>{o.stock <= 0 ? t("out") : `${formatQty(o.stock, o.unit, lang)} ${t("inStock")}`}</span>
+                  </span>
+                  <span className="text-xl font-black whitespace-nowrap">{money(o.pricePoisha)}{isLoose(o.unit) ? <span className="text-base">/{unitLabel(o.unit, lang)}</span> : null}</span>
+                </button>
+              ))}
+            </div>
+            <button className="mt-3 min-h-12 w-full border-[3px] border-line font-black" onClick={() => setChoosing(null)}>{t("cancel")}</button>
+          </div>
+        </div>
+      )}
       {weighing && (
         <WeighDialog product={weighing.product} initial={weighing.qty} lang={lang} t={t} onCancel={() => setWeighing(null)} onConfirm={(qty) => setLooseQty(weighing.product, qty)} />
       )}
@@ -830,7 +915,7 @@ function Receipt({
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-3" role="dialog" aria-modal="true" aria-label={t("receipt")}>
       <div className="w-full max-w-sm">
         <div id="receipt" className="border-[3px] border-line bg-panel p-4 text-sm">
-          {sale.vatRateBp > 0 && <p className="text-center font-black">{t("mushakTitle")}</p>}
+          {sale.vatPoisha > 0 && <p className="text-center font-black">{t("mushakTitle")}</p>}
           <h2 className="text-center text-xl font-black">{storeName}</h2>
           {settings.address && <p className="text-center">{settings.address}</p>}
           {settings.phone && <p className="text-center">{settings.phone}</p>}
@@ -854,8 +939,8 @@ function Receipt({
             </>
           )}
           <div className="mt-1 flex justify-between text-2xl font-black"><span>{t("total")}</span><span>{money(sale.totalPoisha)}</span></div>
-          {sale.vatRateBp > 0 && (
-            <div className="flex justify-between font-bold"><span>{t("vatIncluded")} ({formatNumber(sale.vatRateBp / 100, lang)}%)</span><span data-testid="receipt-vat">{money(sale.vatPoisha)}</span></div>
+          {sale.vatPoisha > 0 && (
+            <div className="flex justify-between font-bold"><span>{sale.vatInclusive ? t("vatIncluded") : t("vatAdded")} ({[...new Set(sale.lines.map((l) => l.vatRateBp).filter(Boolean))].map((r) => `${formatNumber(r / 100, lang)}%`).join(", ")})</span><span data-testid="receipt-vat">{money(sale.vatPoisha)}</span></div>
           )}
           <div className="flex justify-between"><span>{t("paid")} ({t(sale.paymentMethod)})</span><span>{money(sale.tenderedPoisha)}</span></div>
           {sale.paymentMethod === "baki" && (

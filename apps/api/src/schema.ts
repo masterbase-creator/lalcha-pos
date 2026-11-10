@@ -1,5 +1,7 @@
+import { UNITS } from "@lalcha/domain";
 import { sql } from "drizzle-orm";
 import {
+  jsonb,
   bigint,
   boolean,
   foreignKey,
@@ -20,7 +22,22 @@ export const stores = pgTable("stores", {
   subdomain: text("subdomain").notNull().unique(),
   name: text("name").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+  supportNote: text("support_note"),
 });
+
+export const branches = pgTable(
+  "branches",
+  {
+    storeId: uuid("store_id").notNull().references(() => stores.id),
+    id: uuid("id").notNull().defaultRandom(),
+    name: text("name").notNull(),
+    address: text("address"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] })],
+);
 
 export const users = pgTable(
   "users",
@@ -29,6 +46,7 @@ export const users = pgTable(
     id: uuid("id").notNull().defaultRandom(),
     name: text("name").notNull(),
     phone: text("phone"),
+    email: text("email"),
     role: text("role", { enum: ["owner", "manager", "cashier"] }).notNull(),
     pinHash: text("pin_hash").notNull(),
     pinFailed: integer("pin_failed").notNull().default(0),
@@ -36,20 +54,21 @@ export const users = pgTable(
     disabledAt: timestamp("disabled_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.storeId, t.id] }), uniqueIndex("users_store_phone").on(t.storeId, t.phone)],
+  (t) => [primaryKey({ columns: [t.storeId, t.id] }), uniqueIndex("users_store_phone").on(t.storeId, t.phone), uniqueIndex("users_store_email").on(t.storeId, t.email)],
 );
 
+/** One-time codes for connecting a device. "contact" is an email address, or a phone number once SMS is set up. */
 export const loginCodes = pgTable(
   "login_codes",
   {
     storeId: uuid("store_id").notNull().references(() => stores.id),
-    phone: text("phone").notNull(),
+    contact: text("contact").notNull(),
     codeHash: text("code_hash").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     attempts: integer("attempts").notNull().default(0),
     lastSentAt: timestamp("last_sent_at", { withTimezone: true }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.storeId, t.phone] })],
+  (t) => [primaryKey({ columns: [t.storeId, t.contact] })],
 );
 
 export const devices = pgTable(
@@ -60,6 +79,7 @@ export const devices = pgTable(
     name: text("name").notNull(),
     tokenHash: text("token_hash").notNull(),
     pairedBy: uuid("paired_by").notNull(),
+    branchId: uuid("branch_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -106,13 +126,36 @@ export const products = pgTable(
     pricePoisha: poisha("price_poisha"),
     costPoisha: poisha("cost_poisha"),
     imageUrl: text("image_url"),
-    unit: text("unit", { enum: ["pc", "kg", "litre", "metre"] }).notNull().default("pc"),
+    unit: text("unit", { enum: UNITS }).notNull().default("pc"),
+    vatRateBp: integer("vat_rate_bp"),
+    /** Set on a variant: the main product it is listed under. Each variant keeps its own stock. */
+    variantOf: uuid("variant_of"),
+    variantName: text("variant_name"),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
   },
   (t) => [
     primaryKey({ columns: [t.storeId, t.id] }),
     uniqueIndex("products_store_sku").on(t.storeId, t.sku),
     uniqueIndex("products_store_barcode").on(t.storeId, t.barcode),
+  ],
+);
+
+/** Other ways to sell a product's stock: a pack of 12, a 50 kg sack. Selling one takes "qty" of the product's own unit. */
+export const productPacks = pgTable(
+  "product_packs",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    productId: uuid("product_id").notNull(),
+    name: text("name").notNull(),
+    qty: integer("qty").notNull(),
+    pricePoisha: poisha("price_poisha"),
+    barcode: text("barcode"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.storeId, t.id] }),
+    foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [products.storeId, products.id] }),
+    uniqueIndex("product_packs_store_barcode").on(t.storeId, t.barcode),
   ],
 );
 
@@ -123,8 +166,9 @@ export const stockLedger = pgTable(
     storeId: storeId(),
     id: uuid("id").notNull().defaultRandom(),
     productId: uuid("product_id").notNull(),
+    branchId: uuid("branch_id").notNull(),
     qtyDelta: integer("qty_delta").notNull(),
-    reason: text("reason", { enum: ["opening", "sale", "purchase", "return", "adjustment", "purchase_return", "purchase_void"] }).notNull(),
+    reason: text("reason", { enum: ["opening", "sale", "purchase", "return", "adjustment", "purchase_return", "purchase_void", "transfer_out", "transfer_in", "transfer_cancel"] }).notNull(),
     refId: uuid("ref_id"),
     actorId: uuid("actor_id"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().default(sql`now()`),
@@ -133,7 +177,8 @@ export const stockLedger = pgTable(
     primaryKey({ columns: [t.storeId, t.id] }),
     foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [products.storeId, products.id] }),
     foreignKey({ columns: [t.storeId, t.actorId], foreignColumns: [users.storeId, users.id] }),
-    index("stock_ledger_product").on(t.storeId, t.productId),
+    foreignKey({ columns: [t.storeId, t.branchId], foreignColumns: [branches.storeId, branches.id] }),
+    index("stock_ledger_product").on(t.storeId, t.productId, t.branchId),
   ],
 );
 
@@ -164,6 +209,7 @@ export const sales = pgTable(
     id: uuid("id").notNull(),
     cashierId: uuid("cashier_id"),
     customerId: uuid("customer_id"),
+    branchId: uuid("branch_id").notNull(),
     deviceId: text("device_id").notNull(),
     receiptNo: text("receipt_no").notNull(),
     soldAt: timestamp("sold_at", { withTimezone: true }).notNull(),
@@ -175,6 +221,7 @@ export const sales = pgTable(
     paymentRef: text("payment_ref"),
     bakiPaidMethod: text("baki_paid_method").notNull().default("cash"),
     vatRateBp: integer("vat_rate_bp").notNull().default(0),
+    vatInclusive: boolean("vat_inclusive").notNull().default(true),
     vatPoisha: bigint("vat_poisha", { mode: "number" }).notNull().default(0),
   },
   (t) => [
@@ -198,6 +245,13 @@ export const saleLines = pgTable(
     unitPricePoisha: poisha("unit_price_poisha"),
     /** The average cost when sold, so later price changes don't rewrite past profit. */
     costPoisha: bigint("cost_poisha", { mode: "number" }).notNull().default(0),
+    vatRateBp: integer("vat_rate_bp").notNull().default(0),
+    vatPoisha: bigint("vat_poisha", { mode: "number" }).notNull().default(0),
+    /** This line's share of the bill after discount and VAT, which is what a return refunds. */
+    finalPoisha: bigint("final_poisha", { mode: "number" }).notNull().default(0),
+    /** How much of the product's own unit one sold item used: 12000 for a dozen eggs. 1000 when sold by its own unit. */
+    packQty: integer("pack_qty").notNull().default(1000),
+    packName: text("pack_name"),
   },
   (t) => [
     primaryKey({ columns: [t.storeId, t.saleId, t.lineNo] }),
@@ -227,9 +281,11 @@ export const purchases = pgTable(
     /** Created on the device, which makes a retried save harmless. */
     id: uuid("id").notNull(),
     supplierId: uuid("supplier_id").notNull(),
+    branchId: uuid("branch_id").notNull(),
+    receivedValuePoisha: bigint("received_value_poisha", { mode: "number" }).notNull().default(0),
     invoiceNo: text("invoice_no"),
     purchasedAt: timestamp("purchased_at", { withTimezone: true }).notNull(),
-    status: text("status", { enum: ["ordered", "received", "cancelled", "voided"] }).notNull(),
+    status: text("status", { enum: ["ordered", "partial", "received", "cancelled", "voided"] }).notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }),
     discountPoisha: poisha("discount_poisha"),
     totalPoisha: poisha("total_poisha"),
@@ -253,6 +309,7 @@ export const purchaseLines = pgTable(
     lineNo: integer("line_no").notNull(),
     productId: uuid("product_id").notNull(),
     qty: integer("qty").notNull(),
+    receivedQty: integer("received_qty").notNull().default(0),
     unitCostPoisha: poisha("unit_cost_poisha"),
   },
   (t) => [
@@ -352,7 +409,7 @@ export const saleReturnLines = pgTable(
 
 /** Not tied to a store: the store doesn't exist until signup finishes. */
 export const signupCodes = pgTable("signup_codes", {
-  phone: text("phone").primaryKey(),
+  contact: text("contact").primaryKey(),
   codeHash: text("code_hash").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   attempts: integer("attempts").notNull().default(0),
@@ -374,7 +431,7 @@ export const subscriptionPayments = pgTable(
     plan: text("plan").notNull(),
     months: integer("months").notNull(),
     amountPoisha: poisha("amount_poisha"),
-    method: text("method", { enum: ["bkash", "nagad"] }).notNull(),
+    method: text("method", { enum: ["bkash", "nagad", "cash", "bank", "other"] }).notNull(),
     ref: text("ref").notNull(),
     status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -393,6 +450,10 @@ export const storeSettings = pgTable("store_settings", {
   storeId: uuid("store_id").primaryKey().references(() => stores.id),
   vatEnabled: boolean("vat_enabled").notNull().default(false),
   vatRateBp: integer("vat_rate_bp").notNull().default(0),
+  vatInclusive: boolean("vat_inclusive").notNull().default(true),
+  scaleEnabled: boolean("scale_enabled").notNull().default(false),
+  scalePrefix: text("scale_prefix").notNull().default("21"),
+  scaleMode: text("scale_mode", { enum: ["weight", "price"] }).notNull().default("weight"),
   bin: text("bin"),
   address: text("address"),
   phone: text("phone"),
@@ -449,4 +510,124 @@ export const shifts = pgTable(
     foreignKey({ columns: [t.storeId, t.openedBy], foreignColumns: [users.storeId, users.id] }),
     index("shifts_store_opened").on(t.storeId, t.openedAt),
   ],
+);
+
+export const purchaseReceipts = pgTable(
+  "purchase_receipts",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    purchaseId: uuid("purchase_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdBy: uuid("created_by").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] })],
+);
+
+export const stockTransfers = pgTable(
+  "stock_transfers",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull(),
+    fromBranchId: uuid("from_branch_id").notNull(),
+    toBranchId: uuid("to_branch_id").notNull(),
+    status: text("status", { enum: ["sent", "received", "cancelled"] }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdBy: uuid("created_by").notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.storeId, t.id] }),
+    foreignKey({ columns: [t.storeId, t.fromBranchId], foreignColumns: [branches.storeId, branches.id] }),
+    foreignKey({ columns: [t.storeId, t.toBranchId], foreignColumns: [branches.storeId, branches.id] }),
+    index("stock_transfers_store_date").on(t.storeId, t.createdAt),
+  ],
+);
+
+export const stockTransferLines = pgTable(
+  "stock_transfer_lines",
+  {
+    storeId: storeId(),
+    transferId: uuid("transfer_id").notNull(),
+    lineNo: integer("line_no").notNull(),
+    productId: uuid("product_id").notNull(),
+    qty: integer("qty").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.storeId, t.transferId, t.lineNo] }),
+    foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [products.storeId, products.id] }),
+  ],
+);
+
+/** Append-only: the store's record of who did what. */
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    storeId: storeId(),
+    id: uuid("id").notNull().defaultRandom(),
+    actorId: uuid("actor_id"),
+    action: text("action").notNull(),
+    entityId: text("entity_id"),
+    detail: jsonb("detail"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.id] }), index("audit_log_store_at").on(t.storeId, t.at)],
+);
+
+/** Your team's actions on customer stores. */
+export const platformAudit = pgTable("platform_audit", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  storeId: uuid("store_id"),
+  /** Which superadmin did it. */
+  actor: text("actor"),
+  action: text("action").notNull(),
+  detail: text("detail"),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** One-time sign-in codes for the superadmin panel, sent only to emails listed in PLATFORM_ADMIN_EMAILS. */
+export const platformCodes = pgTable("platform_codes", {
+  email: text("email").primaryKey(),
+  codeHash: text("code_hash").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  lastSentAt: timestamp("last_sent_at", { withTimezone: true }).notNull(),
+});
+
+export const platformSessions = pgTable("platform_sessions", {
+  tokenHash: text("token_hash").primaryKey(),
+  email: text("email").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
+
+/**
+ * The company inbox: mail to @lalcha.com arrives from Postal, and replies sent from the superadmin
+ * panel are kept beside it, so a conversation reads in order.
+ */
+export const platformMail = pgTable(
+  "platform_mail",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    direction: text("direction", { enum: ["in", "out"] }).notNull(),
+    /** The @lalcha.com address involved: where it arrived, or what it was sent from. */
+    mailbox: text("mailbox").notNull(),
+    fromAddress: text("from_address").notNull(),
+    fromName: text("from_name"),
+    toAddress: text("to_address").notNull(),
+    subject: text("subject").notNull().default(""),
+    textBody: text("text_body").notNull().default(""),
+    htmlBody: text("html_body"),
+    messageId: text("message_id"),
+    inReplyTo: text("in_reply_to"),
+    references: text("references"),
+    attachments: text("attachments"),
+    /** Postal's own message ID, so a webhook retried by Postal isn't stored twice. */
+    postalId: text("postal_id"),
+    sentBy: text("sent_by"),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("platform_mail_postal_id").on(t.postalId), index("platform_mail_created").on(t.createdAt)],
 );

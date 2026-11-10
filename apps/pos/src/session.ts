@@ -48,21 +48,24 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   return res;
 }
 
-export async function requestCode(phone: string) {
+/** An owner or manager is found by email first; a phone number works too once SMS is connected. */
+export type Contact = { email: string } | { phone: string };
+
+export async function requestCode(contact: Contact) {
   const res = await fetch("/v1/auth/request-code", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ phone }),
+    body: JSON.stringify(contact),
   });
   if (!res.ok) throw new Error("request failed");
   return (await res.json()) as { devCode?: string };
 }
 
-export async function verifyCode(phone: string, code: string, deviceName: string) {
+export async function verifyCode(contact: Contact, code: string, deviceName: string) {
   const res = await fetch("/v1/auth/verify-code", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ phone, code, deviceName }),
+    body: JSON.stringify({ ...contact, code, deviceName }),
   });
   if (res.status === 403) return "limit" as const;
   if (!res.ok) return "bad" as const;
@@ -71,6 +74,34 @@ export async function verifyCode(phone: string, code: string, deviceName: string
   deviceToken = token;
   update({ status: "paired" });
   return "ok" as const;
+}
+
+/** Pages on the main website, which lives on the store address's parent domain. */
+export function siteUrl(path: string) {
+  const host = location.hostname;
+  if (host === "localhost" || host.endsWith(".localhost")) return `http://localhost:4174${path}`;
+  return `https://${host.split(".").slice(1).join(".")}${path}`;
+}
+
+export type DemoInfo = { demo: boolean; staff?: (StaffMember & { pin: string })[] };
+let demoInfo: Promise<DemoInfo> | null = null;
+/** Whether this address is the public demo store. Asked once per page load. */
+export function getDemo() {
+  demoInfo ??= fetch("/v1/demo")
+    .then((r) => (r.ok ? (r.json() as Promise<DemoInfo>) : { demo: false }))
+    .catch(() => ({ demo: false }));
+  return demoInfo;
+}
+
+/** Connects this browser to the demo store without a phone code. */
+export async function connectDemo() {
+  const res = await fetch("/v1/demo/connect", { method: "POST" });
+  if (!res.ok) return false;
+  const { deviceToken: token } = (await res.json()) as { deviceToken: string };
+  await setMeta("device_token", token);
+  deviceToken = token;
+  update({ status: "paired" });
+  return true;
 }
 
 /** Also forgets the offline PIN of anyone who has been removed from the store. */

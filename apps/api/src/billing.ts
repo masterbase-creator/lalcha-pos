@@ -1,9 +1,13 @@
 import {
   billingPaymentSchema,
+  manualSubscriptionSchema,
   DEFAULT_SETTINGS,
   storeSettingsSchema,
   type StoreSettings,
-  phoneSchema,
+  emailSchema,
+  pinSchema,
+  type PlatformLog,
+  buyablePlans,
   planById,
   signupSchema,
   subdomainSchema,
@@ -15,28 +19,30 @@ import {
   type PlatformStore,
   type SubscriptionInfo,
 } from "@lalcha/domain";
-import { and, desc, eq, sql } from "drizzle-orm";
-import type { Hono, MiddlewareHandler } from "hono";
+import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { requireDevice, requireRole, requireSession, sendLoginCode } from "./auth.ts";
+import { requireDevice, requireRole, requireSession } from "./auth.ts";
+import { sendCode } from "./mail.ts";
 import { config } from "./config.ts";
-import { db, pgCode, platformDb, withStore, type Env, type Tx } from "./db.ts";
-import { ApiError, guarded, parse } from "./http.ts";
-import { signupCodes, storeSettings, stores, subscriptionPayments, subscriptions, users } from "./schema.ts";
-import { hashPin, newCode, safeEqual, sha256 } from "./secrets.ts";
+import { audit, db, pgCode, platformDb, withStore, type Env, type Tx } from "./db.ts";
+import { ApiError, guarded, PAGE_SIZE, pageOf, parse } from "./http.ts";
+import { branches, platformAudit, platformCodes, platformSessions, sessions, signupCodes, storeSettings, stores, subscriptionPayments, subscriptions, users } from "./schema.ts";
+import { hashPin, newCode, newToken, safeEqual, sha256 } from "./secrets.ts";
 
 const CODE_TTL_MS = 5 * 60_000;
 const CODE_RESEND_MS = 60_000;
 const MAX_ATTEMPTS = 5;
 
-const signupHash = (phone: string, code: string) => sha256(`${config.otpPepper}:signup:${phone}:${code}`);
+const signupHash = (email: string, code: string) => sha256(`${config.otpPepper}:signup:${email}:${code}`);
 
 export async function getSubscription(tx: Tx, storeId: string): Promise<SubscriptionInfo | null> {
   const [row] = await tx.select().from(subscriptions).where(eq(subscriptions.storeId, storeId));
   if (!row) return null;
   const until = row.paidUntil && row.paidUntil > row.trialEndsAt ? row.paidUntil : row.trialEndsAt;
-  return { plan: row.plan, accessUntil: until.toISOString(), onTrial: row.paidUntil === null };
+  const [store] = await tx.select({ suspendedAt: stores.suspendedAt }).from(stores).where(eq(stores.id, storeId));
+  return { plan: row.plan, accessUntil: until.toISOString(), onTrial: row.paidUntil === null, suspended: Boolean(store?.suspendedAt) };
 }
 
 /**
@@ -53,9 +59,30 @@ export const requireActiveSubscription: MiddlewareHandler<Env> = async (c, next)
   await next();
 };
 
-const platformOnly: MiddlewareHandler<Env> = async (c, next) => {
-  const key = c.req.header("x-platform-key") ?? "";
-  if (!safeEqual(sha256(key), sha256(config.platformKey))) return c.json({ error: "unauthorized" }, 401);
+const PLATFORM_SESSION_MS = 8 * 60 * 60_000;
+const platformCodeHash = (email: string, code: string) => sha256(`${config.otpPepper}:platform:${email}:${code}`);
+const hostOf = (c: { req: { header: (k: string) => string | undefined } }) => (c.req.header("host") ?? "").split(":")[0].toLowerCase();
+
+/**
+ * The superadmin API answers only on its own address. Anywhere else it looks like it doesn't exist,
+ * so a store's address can't be used to probe it. In production, put Cloudflare Access in front too.
+ */
+const adminHostOnly: MiddlewareHandler<Env> = async (c, next) => {
+  if (hostOf(c) !== config.adminHost) return c.json({ error: "not_found" }, 404);
+  await next();
+};
+
+const platformSession: MiddlewareHandler<Env> = async (c, next) => {
+  const token = c.req.header("x-platform-session") ?? "";
+  const [row] = token
+    ? await platformDb
+        .select({ email: platformSessions.email })
+        .from(platformSessions)
+        .where(and(eq(platformSessions.tokenHash, sha256(token)), isNull(platformSessions.revokedAt), gt(platformSessions.expiresAt, new Date())))
+    : [];
+  // Someone removed from PLATFORM_ADMIN_EMAILS loses access at once, even with a session still open.
+  if (!row || !config.platformAdmins.includes(row.email)) return c.json({ error: "unauthorized" }, 401);
+  c.set("platformAdmin", row.email);
   await next();
 };
 
@@ -73,16 +100,16 @@ export function registerPublic(app: Hono<Env>) {
   app.post(
     "/v1/public/signup/request-code",
     guarded(async (c) => {
-      const { phone } = await parse(c, z.object({ phone: phoneSchema }));
+      const { email } = await parse(c, z.object({ email: emailSchema }));
       const code = await db.transaction(async (tx) => {
-        const [existing] = await tx.select({ lastSentAt: signupCodes.lastSentAt }).from(signupCodes).where(eq(signupCodes.phone, phone));
+        const [existing] = await tx.select({ lastSentAt: signupCodes.lastSentAt }).from(signupCodes).where(eq(signupCodes.contact, email));
         if (existing && Date.now() - existing.lastSentAt.getTime() < CODE_RESEND_MS) return null;
         const value = newCode();
-        const row = { codeHash: signupHash(phone, value), expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0, lastSentAt: new Date() };
-        await tx.insert(signupCodes).values({ phone, ...row }).onConflictDoUpdate({ target: signupCodes.phone, set: row });
+        const row = { codeHash: signupHash(email, value), expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0, lastSentAt: new Date() };
+        await tx.insert(signupCodes).values({ contact: email, ...row }).onConflictDoUpdate({ target: signupCodes.contact, set: row });
         return value;
       });
-      if (code) await sendLoginCode(phone, code);
+      if (code) await sendCode(email, code, "নতুন দোকান খোলার কোড");
       return c.json(!config.isProduction && code ? { ok: true, devCode: code } : { ok: true });
     }),
   );
@@ -98,18 +125,19 @@ export function registerPublic(app: Hono<Env>) {
       const [row] = await db
         .update(signupCodes)
         .set({ attempts: sql`${signupCodes.attempts} + 1` })
-        .where(and(eq(signupCodes.phone, input.phone), sql`${signupCodes.expiresAt} > now()`, sql`${signupCodes.attempts} < ${MAX_ATTEMPTS}`))
+        .where(and(eq(signupCodes.contact, input.email), sql`${signupCodes.expiresAt} > now()`, sql`${signupCodes.attempts} < ${MAX_ATTEMPTS}`))
         .returning({ codeHash: signupCodes.codeHash });
-      if (!row || !safeEqual(row.codeHash, signupHash(input.phone, input.code))) throw new ApiError("invalid_code", 401);
+      if (!row || !safeEqual(row.codeHash, signupHash(input.email, input.code))) throw new ApiError("invalid_code", 401);
 
       const storeId = randomUUID();
       const pinHash = await hashPin(input.pin);
       try {
         await withStore(storeId, async (tx) => {
           await tx.insert(stores).values({ id: storeId, subdomain: input.subdomain, name: input.storeName });
-          await tx.insert(users).values({ storeId, name: input.ownerName, phone: input.phone, role: "owner", pinHash });
+          await tx.insert(branches).values({ storeId, name: "Main" });
+          await tx.insert(users).values({ storeId, name: input.ownerName, email: input.email, phone: input.phone, role: "owner", pinHash });
           await tx.insert(subscriptions).values({ storeId, plan: TRIAL_PLAN, trialEndsAt: new Date(Date.now() + TRIAL_DAYS * 86_400_000) });
-          await tx.delete(signupCodes).where(eq(signupCodes.phone, input.phone));
+          await tx.delete(signupCodes).where(eq(signupCodes.contact, input.email));
         });
       } catch (e) {
         if (pgCode(e) === "23505") throw new ApiError("subdomain_taken", 409);
@@ -136,9 +164,10 @@ export function registerBilling(app: Hono<Env>) {
     guarded(async (c) => {
       const store = c.get("store");
       const input = await parse(c, storeSettingsSchema);
-      await withStore(store.id, (tx) =>
-        tx.insert(storeSettings).values({ storeId: store.id, ...input }).onConflictDoUpdate({ target: storeSettings.storeId, set: input }),
-      );
+      await withStore(store.id, async (tx) => {
+        await tx.insert(storeSettings).values({ storeId: store.id, ...input }).onConflictDoUpdate({ target: storeSettings.storeId, set: input });
+        await audit(tx, store.id, c.get("user").id, "settings_update", null, { vatEnabled: input.vatEnabled, vatRateBp: input.vatRateBp, vatInclusive: input.vatInclusive });
+      });
       return c.json({ ok: true });
     }),
   );
@@ -175,7 +204,8 @@ export function registerBilling(app: Hono<Env>) {
       const store = c.get("store");
       if (!config.billingPayTo) throw new ApiError("billing_unavailable", 503);
       const input = await parse(c, billingPaymentSchema);
-      const plan = planById(input.plan);
+      const [current] = await withStore(store.id, (tx) => tx.select({ plan: subscriptions.plan }).from(subscriptions).where(eq(subscriptions.storeId, store.id)));
+      const plan = buyablePlans(current?.plan).find((p) => p.id === input.plan);
       if (!plan) throw new ApiError("invalid");
       try {
         await withStore(store.id, (tx) =>
@@ -204,31 +234,230 @@ export function registerBilling(app: Hono<Env>) {
 }
 
 export function registerPlatform(app: Hono<Env>) {
-  app.use("/v1/platform/*", platformOnly);
+  app.use("/v1/platform/*", adminHostOnly);
+
+  app.post(
+    "/v1/platform/auth/request-code",
+    guarded(async (c) => {
+      const { email } = await parse(c, z.object({ email: emailSchema }));
+      const allowed = config.platformAdmins.includes(email);
+      const code = allowed
+        ? await platformDb.transaction(async (tx) => {
+            const [existing] = await tx.select({ lastSentAt: platformCodes.lastSentAt }).from(platformCodes).where(eq(platformCodes.email, email));
+            if (existing && Date.now() - existing.lastSentAt.getTime() < CODE_RESEND_MS) return null;
+            const value = newCode();
+            const row = { codeHash: platformCodeHash(email, value), expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0, lastSentAt: new Date() };
+            await tx.insert(platformCodes).values({ email, ...row }).onConflictDoUpdate({ target: platformCodes.email, set: row });
+            return value;
+          })
+        : null;
+      // Same reply either way, so nobody can find out which emails are admins.
+      if (code) await sendCode(email, code, "Superadmin sign-in");
+      return c.json(!config.isProduction && code ? { ok: true, devCode: code } : { ok: true });
+    }),
+  );
+
+  app.post(
+    "/v1/platform/auth/verify",
+    guarded(async (c) => {
+      const { email, code } = await parse(c, z.object({ email: emailSchema, code: z.string().regex(/^\d{6}$/) }));
+      const [row] = await platformDb
+        .update(platformCodes)
+        .set({ attempts: sql`${platformCodes.attempts} + 1` })
+        .where(and(eq(platformCodes.email, email), sql`${platformCodes.expiresAt} > now()`, sql`${platformCodes.attempts} < ${MAX_ATTEMPTS}`))
+        .returning({ codeHash: platformCodes.codeHash });
+      if (!row || !config.platformAdmins.includes(email) || !safeEqual(row.codeHash, platformCodeHash(email, code))) throw new ApiError("invalid_code", 401);
+      const token = newToken();
+      const expiresAt = new Date(Date.now() + PLATFORM_SESSION_MS);
+      await platformDb.transaction(async (tx) => {
+        await tx.delete(platformCodes).where(eq(platformCodes.email, email));
+        await tx.insert(platformSessions).values({ tokenHash: sha256(token), email, expiresAt });
+        await tx.insert(platformAudit).values({ actor: email, action: "sign_in" });
+      });
+      return c.json({ token, expiresAt: expiresAt.toISOString(), email });
+    }),
+  );
+
+  // Everything below needs a signed-in superadmin.
+  app.use("/v1/platform/*", async (c, next) => (c.req.path.startsWith("/v1/platform/auth/") ? next() : platformSession(c, next)));
+
+  app.post(
+    "/v1/platform/sign-out",
+    guarded(async (c) => {
+      await platformDb.update(platformSessions).set({ revokedAt: new Date() }).where(eq(platformSessions.tokenHash, sha256(c.req.header("x-platform-session") ?? "")));
+      return c.json({ ok: true });
+    }),
+  );
+
+  const log = (c: Context<Env>, tx: typeof platformDb | Parameters<Parameters<typeof platformDb.transaction>[0]>[0], storeId: string | null, action: string, detail?: string) =>
+    tx.insert(platformAudit).values({ storeId, actor: c.get("platformAdmin"), action, detail: detail ?? null });
+  const storeParam = (c: { req: { param: (k: string) => string | undefined } }) => {
+    const id = z.string().uuid().safeParse(c.req.param("id"));
+    if (!id.success) throw new ApiError("not_found", 404);
+    return id.data;
+  };
 
   app.get(
     "/v1/platform/stores",
     guarded(async (c) => {
-      const rows = await platformDb
-        .select({
-          id: stores.id, name: stores.name, subdomain: stores.subdomain, createdAt: stores.createdAt, plan: subscriptions.plan,
-          trialEndsAt: subscriptions.trialEndsAt, paidUntil: subscriptions.paidUntil, owner: users.name, phone: users.phone,
-        })
-        .from(stores)
-        .leftJoin(subscriptions, eq(subscriptions.storeId, stores.id))
-        .leftJoin(users, and(eq(users.storeId, stores.id), eq(users.role, "owner")))
-        .orderBy(desc(stores.createdAt))
-        .limit(500);
-      const list = rows.map((r): PlatformStore => {
-        const paidUntil = r.paidUntil;
-        const until = paidUntil && r.trialEndsAt && paidUntil > r.trialEndsAt ? paidUntil : r.trialEndsAt;
+      const q = (c.req.query("q") ?? "").trim().toLowerCase().slice(0, 60);
+      const page = pageOf(c);
+      const match = q ? sql`and (strpos(lower(st.name), ${q}) > 0 or strpos(lower(st.subdomain), ${q}) > 0 or strpos(coalesce(o.phone, ''), ${q}) > 0 or strpos(coalesce(o.email, ''), ${q}) > 0)` : sql``;
+      const rows = (await platformDb.execute(sql`
+        select st.id, st.name, st.subdomain, st.created_at as "createdAt", st.suspended_at as "suspendedAt", st.support_note as note,
+               sub.plan, sub.trial_ends_at as "trialEndsAt", sub.paid_until as "paidUntil", o.name as owner, o.phone, o.email,
+               (select count(*)::int from devices d where d.store_id = st.id and d.revoked_at is null) as devices,
+               (select count(*)::int from users u where u.store_id = st.id and u.disabled_at is null) as staff,
+               (select count(*)::int from sales s where s.store_id = st.id and s.sold_at > now() - interval '30 days') as "salesLast30",
+               (select max(s.sold_at) from sales s where s.store_id = st.id) as "lastSaleAt"
+        from stores st
+        left join subscriptions sub on sub.store_id = st.id
+        left join lateral (select name, phone, email from users u where u.store_id = st.id and u.role = 'owner' limit 1) o on true
+        where true ${match}
+        order by st.created_at desc limit ${PAGE_SIZE + 1} offset ${page.offset}
+      `)) as unknown as Record<string, never>[];
+      const list = rows.slice(0, PAGE_SIZE).map((r: Record<string, any>): PlatformStore => {
+        const trial = r.trialEndsAt ? new Date(r.trialEndsAt) : null;
+        const paid = r.paidUntil ? new Date(r.paidUntil) : null;
+        const until = paid && trial && paid > trial ? paid : trial;
         return {
-          id: r.id, name: r.name, subdomain: r.subdomain, plan: r.plan ?? "—", owner: r.owner, phone: r.phone,
+          id: r.id, name: r.name, subdomain: r.subdomain, plan: r.plan ?? "—", owner: r.owner, phone: r.phone, email: r.email, note: r.note, devices: r.devices, staff: r.staff, salesLast30: r.salesLast30,
+          createdAt: new Date(r.createdAt).toISOString(),
+          lastSaleAt: r.lastSaleAt ? new Date(r.lastSaleAt).toISOString() : null,
           accessUntil: until ? until.toISOString() : null,
-          status: until ? subscriptionState({ plan: r.plan ?? "", accessUntil: until.toISOString(), onTrial: paidUntil === null }).status : "expired",
+          suspended: Boolean(r.suspendedAt),
+          status: until ? subscriptionState({ plan: r.plan ?? "", accessUntil: until.toISOString(), onTrial: paid === null, suspended: Boolean(r.suspendedAt) }).status : "expired",
         };
       });
-      return c.json({ stores: list });
+      return c.json({ stores: list, hasMore: rows.length > PAGE_SIZE });
+    }),
+  );
+
+  app.post(
+    "/v1/platform/stores/:id/extend",
+    guarded(async (c) => {
+      const id = storeParam(c);
+      const { days } = await parse(c, z.object({ days: z.number().int().min(1).max(366) }));
+      await platformDb.transaction(async (tx) => {
+        const rows = await tx
+          .update(subscriptions)
+          .set({ trialEndsAt: sql`greatest(now(), ${subscriptions.trialEndsAt}) + make_interval(days => ${days}::int)` })
+          .where(eq(subscriptions.storeId, id))
+          .returning({ id: subscriptions.storeId });
+        if (!rows.length) throw new ApiError("not_found", 404);
+        await log(c, tx, id, "extend", `${days} days`);
+      });
+      return c.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/v1/platform/stores/:id/plan",
+    guarded(async (c) => {
+      const id = storeParam(c);
+      const { plan } = await parse(c, z.object({ plan: z.string() }));
+      if (!planById(plan)) throw new ApiError("invalid");
+      await platformDb.transaction(async (tx) => {
+        const rows = await tx.update(subscriptions).set({ plan }).where(eq(subscriptions.storeId, id)).returning({ id: subscriptions.storeId });
+        if (!rows.length) throw new ApiError("not_found", 404);
+        await log(c, tx, id, "plan", plan);
+      });
+      return c.json({ ok: true });
+    }),
+  );
+
+  // For payments made outside the app: cash, bank transfer, or a deal agreed by phone.
+  app.post(
+    "/v1/platform/stores/:id/subscription",
+    guarded(async (c) => {
+      const id = storeParam(c);
+      const input = await parse(c, manualSubscriptionSchema);
+      if (!planById(input.plan)) throw new ApiError("invalid");
+      const paymentId = randomUUID();
+      // The ref must be unique per method, so a blank one gets a readable generated value.
+      const ref = input.ref || `MANUAL-${paymentId.slice(0, 8).toUpperCase()}`;
+      try {
+        await platformDb.transaction(async (tx) => {
+          const [owner] = await tx.select({ id: users.id }).from(users).where(and(eq(users.storeId, id), eq(users.role, "owner"))).limit(1);
+          if (!owner) throw new ApiError("not_found", 404);
+          await tx.insert(subscriptionPayments).values({
+            storeId: id, id: paymentId, plan: input.plan, months: input.months, amountPoisha: input.amountPoisha,
+            method: input.method, ref, status: "approved", createdBy: owner.id, decidedAt: new Date(),
+          });
+          const rows = await tx
+            .update(subscriptions)
+            .set({
+              plan: input.plan,
+              paidUntil: sql`greatest(now(), ${subscriptions.trialEndsAt}, coalesce(${subscriptions.paidUntil}, 'epoch'::timestamptz)) + make_interval(months => ${input.months}::int)`,
+            })
+            .where(eq(subscriptions.storeId, id))
+            .returning({ id: subscriptions.storeId });
+          if (!rows.length) throw new ApiError("not_found", 404);
+          await log(c, tx, id, "manual_subscription", `${input.plan} · ${input.months} mo · ${input.method} · ${input.amountPoisha / 100} BDT · ${ref}`);
+        });
+      } catch (e) {
+        if (pgCode(e) === "23505") throw new ApiError("duplicate_trx", 409);
+        throw e;
+      }
+      return c.json({ ok: true }, 201);
+    }),
+  );
+
+  app.post(
+    "/v1/platform/stores/:id/suspend",
+    guarded(async (c) => {
+      const id = storeParam(c);
+      const { suspended } = await parse(c, z.object({ suspended: z.boolean() }));
+      await platformDb.transaction(async (tx) => {
+        const rows = await tx.update(stores).set({ suspendedAt: suspended ? new Date() : null }).where(eq(stores.id, id)).returning({ id: stores.id });
+        if (!rows.length) throw new ApiError("not_found", 404);
+        await log(c, tx, id, suspended ? "suspend" : "unsuspend");
+      });
+      return c.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/v1/platform/stores/:id/note",
+    guarded(async (c) => {
+      const id = storeParam(c);
+      const { note } = await parse(c, z.object({ note: z.string().trim().max(1000) }));
+      await platformDb.transaction(async (tx) => {
+        await tx.update(stores).set({ supportNote: note || null }).where(eq(stores.id, id));
+        await log(c, tx, id, "note");
+      });
+      return c.json({ ok: true });
+    }),
+  );
+
+  // For owners who forgot their PIN. The new PIN is shown once and is never stored readable.
+  app.post(
+    "/v1/platform/stores/:id/reset-owner-pin",
+    guarded(async (c) => {
+      const id = storeParam(c);
+      let pin = newCode();
+      while (!pinSchema.safeParse(pin).success) pin = newCode();
+      const pinHash = await hashPin(pin);
+      await platformDb.transaction(async (tx) => {
+        const rows = await tx.update(users).set({ pinHash, pinFailed: 0, pinLockedUntil: null }).where(and(eq(users.storeId, id), eq(users.role, "owner"))).returning({ id: users.id });
+        if (!rows.length) throw new ApiError("not_found", 404);
+        await tx.update(sessions).set({ revokedAt: new Date() }).where(and(eq(sessions.storeId, id), eq(sessions.userId, rows[0].id)));
+        await log(c, tx, id, "reset_owner_pin");
+      });
+      return c.json({ pin });
+    }),
+  );
+
+  app.get(
+    "/v1/platform/log",
+    guarded(async (c) => {
+      const rows = await platformDb
+        .select({ id: platformAudit.id, actor: platformAudit.actor, action: platformAudit.action, detail: platformAudit.detail, at: platformAudit.at, storeName: stores.name })
+        .from(platformAudit)
+        .leftJoin(stores, eq(stores.id, platformAudit.storeId))
+        .orderBy(desc(platformAudit.at))
+        .limit(100);
+      return c.json<{ log: PlatformLog[] }>({ log: rows.map((r) => ({ ...r, at: r.at.toISOString() })) });
     }),
   );
 
@@ -271,6 +500,7 @@ export function registerPlatform(app: Hono<Env>) {
           .returning({ plan: subscriptionPayments.plan, months: subscriptionPayments.months });
         if (!p) throw new ApiError("not_pending", 409);
         // Paying early extends from the current end date, so no paid days are lost.
+        await log(c, tx, storeId, "approve_payment", id);
         await tx
           .update(subscriptions)
           .set({
@@ -293,6 +523,7 @@ export function registerPlatform(app: Hono<Env>) {
         .where(stillPending(storeId, id))
         .returning({ id: subscriptionPayments.id });
       if (!rows.length) throw new ApiError("not_pending", 409);
+      await log(c, platformDb, storeId, "reject_payment", id);
       return c.json({ ok: true });
     }),
   );
