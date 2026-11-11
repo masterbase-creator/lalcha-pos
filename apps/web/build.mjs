@@ -18,6 +18,10 @@ const dist = join(here, "dist");
 const SITE = "https://lalcha.com";
 const REPO = "https://github.com/masterbase-creator/lalcha-pos";
 const CONTACT = "hello@lalcha.com";
+/** The Bangla getting-started guide (docs/onboarding/build-guide.mjs prints it and copies it here). */
+const GUIDE = "/guide/lalcha-pos-guide-bn.pdf";
+/** FAQ answers may carry a link; search engines get the words without the markup. */
+const plain = (html) => html.replace(/<[^>]+>/g, "");
 /** The public demo store. Local preview overrides it, see the root package.json. */
 const DEMO_URL = process.env.DEMO_URL ?? "https://demo.lalcha.com/";
 /** Shown above the demo frame. Always the public address, even in a local preview. */
@@ -35,12 +39,12 @@ cpSync(join(here, "public"), dist, { recursive: true });
 const ui = {
   en: {
     prefix: "/en", other: "/", otherLabel: "বাংলা", locale: "en_US",
-    demo: "Demo", menu: "Menu", shopTypes: "For your shop", contact: "Contact", features: "Features", pricing: "Pricing", openSource: "Open source", signIn: "Sign in", start: "Start free", privacy: "Privacy", terms: "Terms",
+    guide: "Getting started guide (PDF)", demo: "Demo", menu: "Menu", shopTypes: "For your shop", contact: "Contact", features: "Features", pricing: "Pricing", openSource: "Open source", signIn: "Sign in", start: "Start free", privacy: "Privacy", terms: "Terms",
     rights: "Lalcha POS. Open source software for shops in Bangladesh.",
   },
   bn: {
     prefix: "", other: "/en/", otherLabel: "English", locale: "bn_BD",
-    demo: "ডেমো", menu: "মেনু", shopTypes: "দোকান অনুযায়ী", contact: "যোগাযোগ", features: "সুবিধা", pricing: "মূল্য", openSource: "ওপেন সোর্স", signIn: "সাইন ইন", start: "ফ্রি শুরু করুন", privacy: "প্রাইভেসি", terms: "শর্তাবলি",
+    guide: "শুরু করার গাইড (PDF)", demo: "ডেমো", menu: "মেনু", shopTypes: "দোকান অনুযায়ী", contact: "যোগাযোগ", features: "সুবিধা", pricing: "মূল্য", openSource: "ওপেন সোর্স", signIn: "সাইন ইন", start: "ফ্রি শুরু করুন", privacy: "প্রাইভেসি", terms: "শর্তাবলি",
     rights: "Lalcha POS। বাংলাদেশের দোকানের জন্য ওপেন সোর্স সফটওয়্যার।",
   },
 };
@@ -113,7 +117,7 @@ ${[ORG, ...schema].map((s) => `<script type="application/ld+json">${JSON.stringi
 </div></header>
 ${body}
 <footer><div class="wrap"><span>© ${new Date().getFullYear()} ${u.rights}</span>
-<nav aria-label="Footer">${SHOPS.map((x) => `<a href="${u.prefix}/for/${x.slug}/">${x[lang].name}</a>`).join("")}<a href="/open-source/">${u.openSource}</a><a href="/terms/">${u.terms}</a><a href="/privacy/">${u.privacy}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${REPO}">GitHub</a><a href="mailto:${CONTACT}">${CONTACT}</a></nav>
+<nav aria-label="Footer"><a class="guide-link" href="${GUIDE}" download>${u.guide}</a>${SHOPS.map((x) => `<a href="${u.prefix}/for/${x.slug}/">${x[lang].name}</a>`).join("")}<a href="/open-source/">${u.openSource}</a><a href="/terms/">${u.terms}</a><a href="/privacy/">${u.privacy}</a><a href="${u.prefix}/contact/">${u.contact}</a><a href="${REPO}">GitHub</a><a href="mailto:${CONTACT}">${CONTACT}</a></nav>
 </div></footer>
 </body></html>
 `;
@@ -164,6 +168,7 @@ const home = {
       ["Does it work in Bangla?", "Yes. The whole till works in Bangla and English, including Bangla product names and digits."],
       ["Can I sell rice, oil and other loose goods?", "Yes. Sell by kg, litre or metre, enter the quantity or a taka amount, or scan a label from a weighing scale."],
       ["Is Lalcha POS open source?", "Yes. The source code is public under the AGPL-3.0 license, so you can inspect it or host it yourself."],
+      ["Is there a step-by-step guide?", `Yes. <a href="${GUIDE}" download>Download the getting-started guide (PDF, in Bangla)</a>: signup, setting up your shop, products, staff and PINs, selling, baki, purchases, and handing the shop over to your staff.`],
     ],
   },
   bn: {
@@ -202,6 +207,7 @@ const home = {
       ["বাংলায় চলে?", "হ্যাঁ। পুরো কাউন্টার বাংলা ও ইংরেজিতে চলে, বাংলা পণ্যের নাম ও সংখ্যাসহ।"],
       ["চাল, তেলের মতো খোলা পণ্য বিক্রি করা যাবে?", "হ্যাঁ। কেজি, লিটার বা মিটারে বিক্রি করুন, পরিমাণ বা টাকা লিখুন, অথবা ওজন মেশিনের লেবেল স্ক্যান করুন।"],
       ["Lalcha POS কি ওপেন সোর্স?", "হ্যাঁ। সোর্স কোড AGPL-3.0 লাইসেন্সে উন্মুক্ত, তাই আপনি দেখতে বা নিজে হোস্ট করতে পারবেন।"],
+      ["ধাপে ধাপে শেখার কোনো গাইড আছে?", `হ্যাঁ। <a href="${GUIDE}" download>শুরু করার সম্পূর্ণ গাইড নামান (PDF, বাংলায়)</a>: দোকান খোলা, দোকান সাজানো, পণ্য, কর্মী ও পিন, বিক্রি, বাকি, ক্রয় আর কর্মীদের হাতে দোকান বুঝিয়ে দেওয়া পর্যন্ত।`],
     ],
   },
 };
@@ -229,7 +235,7 @@ for (const lang of ["bn", "en"]) {
 </main>`;
   const schema = [
     { "@context": "https://schema.org", "@type": "SoftwareApplication", name: "Lalcha POS", applicationCategory: "BusinessApplication", operatingSystem: "Web", url: SITE, description: c.description, inLanguage: ["bn", "en"], license: "https://www.gnu.org/licenses/agpl-3.0.html", offers: { "@type": "Offer", price: "499", priceCurrency: "BDT" } },
-    { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: c.faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+    { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: c.faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: plain(a) } })) },
   ];
   write(lang === "en" ? "en" : "", page({ lang, path: "/", title: c.title, description: c.description, body, schema }));
 
@@ -359,7 +365,7 @@ for (const lang of ["bn", "en"]) {
           offers: [{ "@type": "Offer", name: "Starter", price: "499", priceCurrency: "BDT" }, { "@type": "Offer", name: "Growth", price: "999", priceCurrency: "BDT" }],
         },
         { "@context": "https://schema.org", "@type": "HowTo", name: c.h1, step: c.steps.map((text, i) => ({ "@type": "HowToStep", position: i + 1, text })) },
-        { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: c.faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+        { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: c.faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: plain(a) } })) },
       ],
       body: `<main>
 <nav class="crumbs wrap" aria-label="Breadcrumb"><a href="${u.prefix}/">${s.home}</a> › <a href="${u.prefix}/for/">${u.shopTypes}</a> › <span>${c.name}</span></nav>
@@ -409,6 +415,7 @@ ${SHOPS.map((x) => `- [${en(x).h1}](${SITE}/en/for/${x.slug}/): ${en(x).descript
 - [Home (English)](${SITE}/en/)
 - [Live demo](https://demo.lalcha.com/): a sample shop that resets every hour
 - [Contact](${SITE}/en/contact/)
+- [Getting started guide (Bangla PDF)](${SITE}${GUIDE}): signup, setup, products, staff and PINs, selling, baki, purchases, handover
 - [Open source](${SITE}/open-source/)
 
 ## Optional

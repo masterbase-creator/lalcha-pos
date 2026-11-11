@@ -156,3 +156,6 @@ details.staff summary { cursor:pointer; font-weight:700; color:var(--muted); }
 .suggest { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; font-size:15px; font-weight:700; color:var(--muted); }
 .suggest .chip { font:inherit; font-weight:800; color:var(--ink); background:var(--panel); border:2px solid var(--line); padding:6px 10px; cursor:pointer; }
 .suggest .chip:hover { background:var(--accent); }
+/* The downloadable guide stands out in the footer */
+footer a.guide-link { background:var(--accent); color:var(--ink); padding:2px 8px; text-decoration:none; }
+details p a { font-weight:800; }

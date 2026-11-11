@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<title>Lalcha POS: শুরু করার সম্পূর্ণ গাইড</title>
+<style>
+  /* Fonts are linked by build-guide.mjs from the website's own font files. */
+  /*FONTS*/
+  :root { --ink:#12130F; --cream:#F7F4EA; --panel:#FFFDF6; --lime:#D7FF3F; --red:#B3261E; --muted:#5D5C50; --line:#12130F; }
+  @page {
+    size: A4; margin: 20mm 16mm 18mm;
+    @top-left { content: "Lalcha POS · শুরু করার গাইড"; font: 700 9pt "Hind Siliguri"; color: #5D5C50; }
+    @top-right { content: "lalcha.com"; font: 700 9pt "Archivo"; color: #5D5C50; }
+    @bottom-center { content: counter(page, bengali); font: 700 9pt "Lalcha Digits", "Hind Siliguri"; color: #12130F; }
+  }
+  @page cover { margin: 0; @top-left { content: none } @top-right { content: none } @bottom-center { content: none } }
+  * { box-sizing: border-box; }
+  html { font: 500 11.2pt/1.62 "Lalcha Digits", "Hind Siliguri", sans-serif; color: var(--ink); }
+  body { margin: 0; }
+  h1, h2, h3 { line-height: 1.25; margin: 0; }
+  p { margin: 0 0 7pt; }
+  .en { font-family: "Archivo", "Hind Siliguri"; }
+
+  /* Cover */
+  .cover { page: cover; height: 297mm; position: relative; background: var(--cream); overflow: hidden; break-after: page; }
+  .cover .band { position: absolute; inset: 0 0 auto 0; height: 14mm; background: var(--lime); border-bottom: 2.5mm solid var(--ink); }
+  .cover .frame { position: absolute; left: 16mm; right: 16mm; top: 34mm; bottom: 30mm; background: var(--panel); border: 2.2mm solid var(--ink); box-shadow: 4mm 4mm 0 var(--ink); padding: 18mm 16mm; }
+  .brand { display: flex; align-items: center; gap: 5mm; }
+  .brand .word { font: 900 30pt/1 "Archivo"; letter-spacing: -0.5pt; }
+  .pos { display: inline-block; font: 900 13pt/1 "Archivo"; background: var(--lime); border: 0.8mm solid var(--ink); border-radius: 2mm; padding: 2mm 3mm 1.6mm; }
+  .cover h1 { font-size: 34pt; margin-top: 22mm; }
+  .cover .sub { font-size: 15pt; color: var(--muted); margin-top: 6mm; max-width: 125mm; }
+  .cover .who { margin-top: 12mm; display: flex; gap: 3mm; flex-wrap: wrap; }
+  .chip { display: inline-block; border: 0.7mm solid var(--ink); border-radius: 99mm; padding: 1.4mm 4.5mm; font-weight: 700; font-size: 11pt; background: var(--panel); }
+  .chip.lime { background: var(--lime); }
+  .cover .glass { position: absolute; right: 18mm; bottom: 26mm; width: 52mm; }
+  .cover .foot { position: absolute; left: 16mm; right: 16mm; bottom: 10mm; display: flex; justify-content: space-between; font-weight: 700; color: var(--muted); }
+
+  /* Contents */
+  .toc { break-after: page; }
+  .toc h2 { font-size: 22pt; margin-bottom: 6mm; }
+  .toc ol { list-style: none; padding: 0; margin: 0; columns: 2; column-gap: 10mm; }
+  .toc li { break-inside: avoid; display: flex; gap: 3mm; padding: 1.6mm 0; border-bottom: 0.3mm solid #12130F22; font-weight: 700; }
+  .toc li span.n { display: inline-grid; place-items: center; min-width: 7.5mm; height: 7.5mm; border: 0.6mm solid var(--ink); border-radius: 1.6mm; font-size: 9.5pt; background: var(--lime); }
+
+  /* Sections */
+  section.chapter { break-before: page; }
+  section.chapter.flow { break-before: auto; margin-top: 10mm; }
+  section.chapter:first-of-type { break-before: page; }
+  .chead { break-after: avoid; break-inside: avoid; display: flex; align-items: center; gap: 4mm; margin-bottom: 5mm; padding-bottom: 3mm; border-bottom: 1mm solid var(--ink); }
+  .chead .num { display: grid; place-items: center; width: 12mm; height: 12mm; background: var(--ink); color: var(--lime); font: 900 15pt "Hind Siliguri"; border-radius: 2.5mm; flex: none; }
+  .chead h2 { font-size: 19pt; }
+  h3 { font-size: 13pt; margin: 5mm 0 2.5mm; break-after: avoid; }
+  ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 0 0 4mm; }
+  ol.steps > li { counter-increment: s; position: relative; padding: 2.4mm 0 2.4mm 12mm; border-bottom: 0.3mm dashed #12130F33; break-inside: avoid; }
+  ol.steps > li::before { content: counter(s, bengali); position: absolute; left: 0; top: 2mm; width: 8mm; height: 8mm; display: grid; place-items: center; border: 0.7mm solid var(--ink); border-radius: 50%; background: var(--panel); font-weight: 700; font-size: 10pt; }
+  ul.dots { margin: 0 0 4mm; padding-left: 6mm; }
+  ul.dots li { margin: 1mm 0; }
+  .btn { display: inline-block; background: var(--ink); color: var(--lime); font-weight: 700; padding: 0.2mm 2.2mm; border-radius: 1mm; font-size: 10pt; white-space: nowrap; }
+  .tab { display: inline-block; border: 0.5mm solid var(--ink); padding: 0 2mm; font-weight: 700; font-size: 10pt; border-radius: 1mm; background: var(--panel); white-space: nowrap; }
+  .box { border: 0.8mm solid var(--ink); padding: 3.5mm 4.5mm; margin: 3.5mm 0; break-inside: avoid; background: var(--panel); }
+  .box.tip { border-left: 4mm solid var(--lime); }
+  .box.warn { border-left: 4mm solid var(--red); }
+  .box b.t { display: block; margin-bottom: 1mm; }
+  table { width: 100%; border-collapse: collapse; margin: 3mm 0 5mm; font-size: 10.2pt; break-inside: avoid; }
+  th, td { border: 0.5mm solid var(--ink); padding: 1.8mm 2.5mm; text-align: left; vertical-align: top; }
+  th { background: var(--ink); color: var(--panel); }
+  td.y { text-align: center; font-weight: 800; }
+  tr:nth-child(even) td { background: #12130F08; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm; break-inside: avoid; }
+  .card { border: 0.8mm solid var(--ink); padding: 3.5mm 4mm; break-inside: avoid; }
+  .card h4 { margin: 0 0 1.5mm; font-size: 11.5pt; }
+  .addr { font: 700 11pt "Archivo"; background: var(--cream); border: 0.5mm solid var(--ink); padding: 0.3mm 2mm; white-space: nowrap; }
+  .checklist li { list-style: none; position: relative; padding-left: 9mm; margin: 2mm 0; }
+  .checklist li::before { content: ""; position: absolute; left: 0; top: 1mm; width: 5mm; height: 5mm; border: 0.7mm solid var(--ink); border-radius: 1mm; background: var(--panel); }
+  .checklist { padding: 0; }
+  .end { margin-top: 10mm; background: var(--ink); color: var(--panel); padding: 7mm 8mm; break-inside: avoid; }
+  .end h3 { color: var(--lime); margin-top: 0; }
+</style>
+</head>
+<body>
+
+<!-- ============ Cover ============ -->
+<div class="cover">
+  <div class="band"></div>
+  <div class="frame">
+    <div class="brand">/*MARK:16*/<span class="word">Lalcha</span><span class="pos">POS</span></div>
+    <h1>শুরু করার<br>সম্পূর্ণ গাইড</h1>
+    <p class="sub">দোকান খোলা থেকে প্রথম বিক্রি, পণ্য, কর্মী, পিন, ক্রয়, বাকির খাতা আর কর্মীদের হাতে দোকান বুঝিয়ে দেওয়া পর্যন্ত, ধাপে ধাপে।</p>
+    <div class="who"><span class="chip lime">দোকান মালিক</span><span class="chip">ম্যানেজার</span><span class="chip">ক্যাশিয়ার</span></div>
+  </div>
+  <div class="glass">/*MARK:52*/</div>
+  <div class="foot"><span>lalcha.com</span><span>সংস্করণ ১ · নভেম্বর ২০২৬</span></div>
+</div>
+
+<!-- ============ Contents ============ -->
+<div class="toc">
+  <h2>এই গাইডে যা আছে</h2>
+  <ol>
+    <li><span class="n">১</span>শুরু করার আগে</li>
+    <li><span class="n">২</span>দোকান খোলা (সাইন আপ)</li>
+    <li><span class="n">৩</span>প্রথমবার ঢোকা ও দোকান সাজানো</li>
+    <li><span class="n">৪</span>দোকানের নাম, লোগো ও তথ্য</li>
+    <li><span class="n">৫</span>পণ্য যোগ করা</li>
+    <li><span class="n">৬</span>এক্সেল থেকে একবারে পণ্য তোলা</li>
+    <li><span class="n">৭</span>কর্মী যোগ ও পিন ঠিক করা</li>
+    <li><span class="n">৮</span>নতুন ডিভাইস যুক্ত করা</li>
+    <li><span class="n">৯</span>প্রতিদিন সাইন ইন ও লক</li>
+    <li><span class="n">১০</span>শিফট ও ক্যাশ গোনা</li>
+    <li><span class="n">১১</span>বিক্রি করা</li>
+    <li><span class="n">১২</span>বাকির খাতা ও ক্রেতা</li>
+    <li><span class="n">১৩</span>ফেরত নেওয়া</li>
+    <li><span class="n">১৪</span>ক্রয় ও সরবরাহকারী</li>
+    <li><span class="n">১৫</span>শাখা ও স্টক স্থানান্তর</li>
+    <li><span class="n">১৬</span>রিপোর্ট, খরচ ও হিসাব</li>
+    <li><span class="n">১৭</span>দোকান অনুযায়ী বিশেষ ফিচার</li>
+    <li><span class="n">১৮</span>পিন, ইমেইল ও নিরাপত্তা</li>
+    <li><span class="n">১৯</span>কর্মীদের হাতে দোকান বুঝিয়ে দেওয়া</li>
+    <li><span class="n">২০</span>বিলিং, ইন্টারনেট ও সাহায্য</li>
+  </ol>
+  <div class="box tip" style="margin-top:9mm">
+    <b class="t">এই গাইড কীভাবে পড়বেন</b>
+    নতুন দোকান হলে ১ থেকে ৯ পর্যন্ত একবার পড়ে ধাপগুলো করে ফেলুন। প্রতিদিনের কাজ (বিক্রি, বাকি, ফেরত, ক্রয়) ১০ থেকে ১৫-এ আছে। কর্মীদের দোকান বুঝিয়ে দেওয়ার আগে ১৯ নম্বর অংশের চেকলিস্টটা অবশ্যই দেখুন। গাইডে <span class="btn">কালো বোতাম</span> মানে অ্যাপের বোতাম, আর <span class="tab">বাক্সে লেখা</span> মানে ওপরের মেনুর পাতা।
+  </div>
+</div>
+
+<!-- ============ 1 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১</span><h2>শুরু করার আগে</h2></div>
+  <p>Lalcha POS হলো দোকানের বিক্রি, স্টক, বাকির খাতা, ক্রয় আর লাভের হিসাব রাখার সফটওয়্যার। মোবাইল, ট্যাব, ল্যাপটপ বা কম্পিউটার, যেকোনো কিছুর ব্রাউজারেই চলে, আলাদা কিছু ইনস্টল করতে হয় না।</p>
+  <h3>যা যা লাগবে</h3>
+  <ul class="dots">
+    <li><b>একটা ইমেইল ঠিকানা</b> (যেমন Gmail)। দোকান খোলা আর নতুন ডিভাইস যুক্ত করার কোড এখানে আসবে। এমন ইমেইল দিন যেটা আপনি নিয়মিত দেখেন।</li>
+    <li><b>একটা স্মার্টফোন বা কম্পিউটার</b>, সাথে Chrome বা Edge ব্রাউজার।</li>
+    <li><b>প্রথমবার ইন্টারনেট।</b> এরপর ইন্টারনেট না থাকলেও বিক্রি চলবে।</li>
+    <li>ইচ্ছা হলে: বারকোড স্ক্যানার, রসিদ প্রিন্টার, ক্যাশ ড্রয়ার। এগুলো ছাড়াও পুরো দোকান চালানো যায়।</li>
+  </ul>
+  <h3>কে কী করতে পারেন</h3>
+  <p>দোকানে তিন ধরনের মানুষ থাকেন। কাকে কোন ভূমিকা দেবেন, আগে থেকে ঠিক করে নিন।</p>
+  <table>
+    <tr><th style="width:44%">কাজ</th><th>মালিক</th><th>ম্যানেজার</th><th>ক্যাশিয়ার</th></tr>
+    <tr><td>বিক্রি করা, রসিদ দেওয়া</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td></tr>
+    <tr><td>বাকিতে বিক্রি, বাকি আদায়</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td></tr>
+    <tr><td>শিফট শুরু ও বন্ধ, ক্যাশ গোনা</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td></tr>
+    <tr><td>পণ্য যোগ, দাম ও স্টক বদলানো</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">-</td></tr>
+    <tr><td>ক্রয়, সরবরাহকারী, ফেরত</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">-</td></tr>
+    <tr><td>রিপোর্ট, লাভ-ক্ষতি, কার্যক্রমের হিসাব</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">-</td></tr>
+    <tr><td>কর্মী যোগ, পিন বদল, ডিভাইস যুক্ত করা</td><td class="y">/*CHECK*/</td><td class="y">/*CHECK*/</td><td class="y">-</td></tr>
+    <tr><td>সেটিংস, লোগো, বিলিং (পেমেন্ট)</td><td class="y">/*CHECK*/</td><td class="y">-</td><td class="y">-</td></tr>
+  </table>
+  <div class="box tip"><b class="t">ছোট দোকানে</b>মালিক নিজেই সব করলে আর কাউকে যোগ করতে হবে না। একজন কর্মী থাকলে তাঁকে ক্যাশিয়ার বানিয়ে দিন, তাহলে দাম বা স্টক বদলাতে পারবেন না।</div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="chapter">
+  <div class="chead"><span class="num">২</span><h2>দোকান খোলা (সাইন আপ)</h2></div>
+  <p>পুরো কাজটা পাঁচ মিনিটের। ১৪ দিন ফ্রি, শুরু করতে কোনো পেমেন্ট লাগবে না।</p>
+  <ol class="steps">
+    <li>ব্রাউজারে <span class="addr">lalcha.com</span> খুলুন, তারপর ওপরে ডানদিকে <span class="btn">ফ্রি শুরু করুন</span> চাপুন। আপনার দোকান যদি ফার্মেসি, রেস্টুরেন্ট বা অন্য কোনো ধরনের হয়, <span class="tab">দোকান অনুযায়ী</span> থেকে সেই পাতা খুলে সেখান থেকে শুরু করুন। তাহলে পরের ধাপে আপনার দোকানের ধরন আগে থেকেই বাছা থাকবে।</li>
+    <li><b>দোকানের নাম</b> লিখুন, যেমন “রহিম স্টোর”। পরে বদলানো যায়।</li>
+    <li><b>দোকানের ওয়েব ঠিকানা</b> দেখে নিন। দোকানের নাম লিখলে ঠিকানা নিজে থেকেই বসে যায়, যেমন <span class="addr">rahim-store.lalcha.com</span>। চাইলে নিজে বদলাতে পারেন: শুধু ইংরেজি ছোট হাতের অক্ষর, সংখ্যা আর হাইফেন (৩–৩০টি)।</li>
+    <li>ঠিকানার নিচে সবুজ <b>“/*CHECK*/ এই ঠিকানা পাওয়া যাচ্ছে”</b> দেখলে ঠিক আছে। লাল <b>“/*CROSS*/ আগেই নেওয়া হয়েছে”</b> দেখালে নিচে কয়েকটা খালি ঠিকানা দেখাবে, পছন্দেরটায় একবার ট্যাপ করুন।</li>
+    <li><b>আপনার নাম</b> আর <b>ইমেইল</b> দিন। মোবাইল নম্বর ঐচ্ছিক।</li>
+    <li><b>পিন</b> ঠিক করুন: ৪ থেকে ৬ সংখ্যা। এই পিন দিয়েই প্রতিদিন দোকানে ঢুকবেন, তাই মনে রাখার মতো কিন্তু অনুমান করা কঠিন এমন কিছু দিন।</li>
+    <li><span class="btn">কোড পাঠান</span> চাপুন। ইমেইলে ৬ সংখ্যার একটা কোড আসবে (না দেখলে স্প্যাম ফোল্ডার দেখুন)। কোডটা লিখে <span class="btn">দোকান তৈরি করুন</span> চাপুন।</li>
+    <li>ব্যস! আপনাকে সরাসরি নিজের দোকানে নিয়ে যাবে, এই ডিভাইস আগে থেকেই যুক্ত থাকবে। আবার কোড লাগবে না।</li>
+  </ol>
+  <div class="box warn"><b class="t">পিনের নিয়ম</b>১১১১, ১২৩৪, ৯৮৭৬-এর মতো সহজ পিন নেওয়া হয় না। নিজের জন্মসাল বা মোবাইল নম্বরের শেষ সংখ্যাও এড়িয়ে চলুন। পিন কাউকে বলবেন না, কর্মীকেও না: কর্মীদের জন্য আলাদা পিন হবে (৭ নম্বর অংশ)।</div>
+  <div class="box tip"><b class="t">দোকানের ঠিকানাটা লিখে রাখুন</b>এই ঠিকানাই আপনার দোকান, যেমন <span class="addr">rahim-store.lalcha.com</span>। মোবাইলে খুলে <b>“হোম স্ক্রিনে যোগ করুন”</b> করলে অ্যাপের মতো একটা আইকন পাবেন। কর্মীরাও এই ঠিকানাতেই কাজ করবেন।</div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৩</span><h2>প্রথমবার ঢোকা ও দোকান সাজানো</h2></div>
+  <ol class="steps">
+    <li>“কে কাজ করছেন?” পাতায় নিজের নামে ট্যাপ করুন, তারপর সাইন আপের সময় দেওয়া পিন দিন।</li>
+    <li><b>ধাপ ১: আপনার দোকান কী ধরনের?</b> মুদি, জেনারেল স্টোর, ফার্মেসি, রেস্টুরেন্ট, চায়ের দোকান, হার্ডওয়্যার, ফার্নিচার, মোবাইল ও ইলেকট্রনিক্স, অটো পার্টস, কাপড়, জুয়েলারি, কসমেটিকস, চশমা, স্টেশনারি, বেকারি, কৃষি, পাইকারি বা অন্য দোকান থেকে একটা বাছুন। এতে পণ্যের ক্যাটাগরিগুলো আপনার দোকানের মতো হবে।</li>
+    <li><b>ধাপ ২: যা যা লাগবে বেছে নিন।</b> আপনার ধরনের দোকানে সাধারণত যা লাগে, তা আগেই টিক দেওয়া থাকে:
+      <ul class="dots">
+        <li><b>ব্যাচ ও মেয়াদ:</b> ওষুধ, কসমেটিকস, বেকারির মতো মেয়াদওয়ালা মালের জন্য।</li>
+        <li><b>সিরিয়াল নম্বর ও ওয়ারেন্টি:</b> মোবাইল ও ইলেকট্রনিক্সের আইএমইআই।</li>
+        <li><b>টেবিল, কিচেন টিকিট ও অপশন:</b> রেস্টুরেন্ট ও ক্যাফের জন্য।</li>
+        <li><b>পয়েন্ট, কুপন ও গিফট কার্ড:</b> নিয়মিত ক্রেতাদের পুরস্কার।</li>
+        <li><b>খরচ ও হিসাবপত্র:</b> ভাড়া, বেতন লিখে আসল লাভ দেখা।</li>
+      </ul></li>
+    <li><b>ধাপ ৩: রসিদ আর ক্যাশ ড্রয়ার।</b> শুরুতে “সাধারণ প্রিন্ট উইন্ডো দিয়ে” রাখাই সহজ, যেকোনো প্রিন্টারে চলে। থার্মাল রসিদ প্রিন্টার থাকলে “সরাসরি থার্মাল প্রিন্টারে” বেছে <span class="btn">প্রিন্টার যুক্ত করুন</span> চাপুন, একটা <span class="btn">টেস্ট প্রিন্ট</span> দিয়ে দেখে নিন। ড্রয়ার প্রিন্টারে লাগানো থাকলে “নগদ বিক্রির পর ক্যাশ ড্রয়ার খুলবে” টিক দিন।</li>
+    <li><span class="btn">বিক্রি শুরু করুন</span> চাপুন। এখন থেকে ওপরের মেনুতে আপনার দোকানের সব পাতা দেখবেন।</li>
+  </ol>
+  <div class="box tip"><b class="t">পরে বদলানো যায়</b>দোকানের ধরন, ফিচার বা প্রিন্টার, সবকিছুই পরে <span class="tab">সেটিংস</span> থেকে বদলাতে পারবেন। ভুল হলে চিন্তা নেই।</div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৪</span><h2>দোকানের নাম, লোগো ও তথ্য</h2></div>
+  <p>আপনার দোকানের ঠিকানায় Lalcha-র নাম দেখায় না, দেখায় আপনার দোকানের নাম আর লোগো: ওপরের অংশে, ব্রাউজারের ট্যাবে, রসিদে আর মোবাইলে ইনস্টল করা অ্যাপে।</p>
+  <ol class="steps">
+    <li><span class="tab">সেটিংস</span> খুলুন। সবার ওপরে “দোকানের নাম ও লোগো”।</li>
+    <li><span class="btn">লোগো দিন</span> চেপে লোগোর ছবি বাছুন। চারকোনা, সাদা বা স্বচ্ছ ব্যাকগ্রাউন্ডের লোগো সবচেয়ে ভালো দেখায়।</li>
+    <li>দরকার হলে নাম বদলে <span class="btn">নাম সেভ করুন</span>। নাম বাংলাতেও দিতে পারেন, যেমন “রহিম টি স্টল”।</li>
+    <li>নিচে “ভ্যাট ও চালান”-এ দোকানের ঠিকানা আর ফোন নম্বর দিন, এগুলো রসিদে ছাপা হবে। ভ্যাট নিলে হার আর বিআইএন দিন, রসিদে মূসক-৬.৩ তথ্য আসবে।</li>
+    <li>সবশেষে নিচের <span class="btn">সেভ করুন</span> চাপুন।</li>
+  </ol>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৫</span><h2>পণ্য যোগ করা</h2></div>
+  <ol class="steps">
+    <li><span class="tab">পণ্য তালিকা</span> খুলে <span class="btn">+ পণ্য যোগ করুন</span> চাপুন।</li>
+    <li><b>ছবি:</b> <span class="btn">ছবি তুলুন বা বাছাই করুন</span> চেপে মোবাইল দিয়ে পণ্যের ছবি তুলুন। ছবি থাকলে কাউন্টারে খুঁজে পেতে সুবিধা।</li>
+    <li><b>নাম:</b> বাংলা, ইংরেজি বা দুটোই। একটা দিলেও চলবে।</li>
+    <li><b>বিক্রয় মূল্য</b> আর <b>ক্রয় মূল্য</b> দিন। ক্রয় মূল্য দিলে লাভের হিসাব ঠিক আসে, ক্যাশিয়াররা এটা দেখতে পান না।</li>
+    <li><b>বিক্রির একক (বাধ্যতামূলক):</b> পিস, কেজি, গ্রাম, লিটার, মিলি, মিটার, ফুট, গজ, বর্গফুট, ডজন, হালি, বক্স, প্যাকেট, বস্তা বা ভরি। কেজি, লিটার, ফুটের মতো এককে ভগ্নাংশে বিক্রি করা যায় (যেমন ২.৫ কেজি)।</li>
+    <li><b>ক্যাটাগরি</b> বাছুন, আর বারকোড থাকলে স্ক্যান করে বসিয়ে দিন।</li>
+    <li><b>শুরুর স্টক:</b> এখন দোকানে কতটা আছে লিখুন। তারপর <span class="btn">সেভ করুন</span>।</li>
+  </ol>
+  <h3>একই পণ্যের নানা রূপ</h3>
+  <div class="two">
+    <div class="card"><h4>প্যাক (একই স্টক)</h4>একই মাল অন্যভাবে আলাদা দামে বিক্রি: ডিম পিসে, আবার “ডজন = ১২ পিস”; চাল কেজিতে, আবার “বস্তা = ৫০ কেজি”। প্যাক বিক্রি হলে মূল পণ্যের স্টক থেকেই কমে। পণ্যের ফর্মে “প্যাক যোগ করুন”।</div>
+    <div class="card"><h4>ভ্যারিয়েন্ট (আলাদা স্টক)</h4>সাইজ বা রং, যার প্রত্যেকটার নিজস্ব দাম ও স্টক: টি-শার্ট S, M, L; পাইপ আধা ইঞ্চি, পৌনে এক ইঞ্চি। মূল পণ্য খুলে “ভ্যারিয়েন্ট যোগ করুন”। কাউন্টারে সব একটা টাইলের নিচে দেখায়।</div>
+  </div>
+  <h3>স্টক বাড়ানো বা কমানো</h3>
+  <p>পণ্য খুলে “স্টক যোগ বা কমান” ঘরে লিখুন: ১০ মানে ১০টা যোগ, -৩ মানে ৩টা কমবে। সরবরাহকারীর কাছ থেকে মাল এলে অবশ্য <span class="tab">ক্রয়</span> থেকে লিখুন (১৪ নম্বর অংশ), তাতে ক্রয়মূল্য আর পাওনাও ঠিক থাকে।</p>
+  <div class="box warn"><b class="t">পণ্য মুছবেন না, সরান</b>পুরোনো বিক্রির হিসাব যেন না হারায়, তাই পণ্য মোছা হয় না, শুধু তালিকা থেকে সরানো হয় (“পণ্য সরান”, নিশ্চিত করতে আবার ট্যাপ)।</div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৬</span><h2>এক্সেল থেকে একবারে পণ্য তোলা</h2></div>
+  <p>অনেক পণ্য থাকলে একটা একটা না করে এক্সেলে লিখে একবারে তুলুন।</p>
+  <ol class="steps">
+    <li><span class="tab">পণ্য তালিকা</span> /*ARROW*/ <span class="btn">ইমপোর্ট</span> /*ARROW*/ <span class="btn">টেমপ্লেট নামান</span>।</li>
+    <li>টেমপ্লেটে প্রতি লাইনে একটা পণ্য লিখুন: নাম, ক্যাটাগরি, একক, বিক্রয় মূল্য, ক্রয় মূল্য, বারকোড, স্টক।</li>
+    <li><span class="btn">ফাইল বাছাই করুন</span> চেপে ফাইলটা দিন। কয়টা প্রস্তুত আর কয়টায় সমস্যা, আগেই দেখাবে।</li>
+    <li><span class="btn">পণ্য ইমপোর্ট করুন</span> চাপুন। সমস্যার লাইনগুলো ঠিক করে আবার দিন, বাকিগুলো আর দুবার উঠবে না।</li>
+  </ol>
+  <div class="box tip"><b class="t">ছবি পরে</b>ইমপোর্টে ছবি যায় না। পণ্য ওঠার পর মোবাইল দিয়ে একটা একটা খুলে ছবি তুলে দিন।</div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৭</span><h2>কর্মী যোগ ও পিন ঠিক করা</h2></div>
+  <p>প্রত্যেক কর্মীর আলাদা নাম আর পিন থাকা জরুরি। তাহলে কে কোন বিক্রি করল, কে ক্যাশ গুনল, সব আলাদা করে দেখা যায়।</p>
+  <ol class="steps">
+    <li><span class="tab">কর্মী</span> খুলে <span class="btn">কর্মী যোগ করুন</span> চাপুন।</li>
+    <li>কর্মীর <b>নাম</b> দিন, <b>ভূমিকা</b> বাছুন: ম্যানেজার বা ক্যাশিয়ার (১ নম্বর অংশের তালিকা দেখুন)।</li>
+    <li><b>ম্যানেজারের ইমেইল দিন।</b> নতুন ডিভাইস যুক্ত করা আর পিন ভুলে গেলে বদলানোর কোড এখানে যাবে। ক্যাশিয়ারের ইমেইল লাগে না।</li>
+    <li><b>পিন</b> দিন: ৪–৬ সংখ্যা, সহজ নয়। সবচেয়ে ভালো হয় কর্মীকে পাশে বসিয়ে তাঁকে দিয়েই পিনটা টাইপ করানো, যাতে আপনিও না জানেন।</li>
+    <li><span class="btn">সেভ করুন</span>। কর্মী এখন “কে কাজ করছেন?” পাতায় নিজের নাম দেখবেন।</li>
+  </ol>
+  <h3>পিন বদলানো ও কর্মী বাদ দেওয়া</h3>
+  <ul class="dots">
+    <li><b>কর্মী পিন ভুলে গেলে:</b> <span class="tab">কর্মী</span> /*ARROW*/ কর্মীর নাম /*ARROW*/ “নতুন পিন” ঘরে নতুন পিন দিয়ে সেভ।</li>
+    <li><b>কর্মী চাকরি ছেড়ে দিলে:</b> কর্মীর নাম খুলে “এই ব্যক্তিকে নিষ্ক্রিয় করুন” টিক দিয়ে সেভ। সাথে সাথে তাঁর পিন আর কাজ করবে না, কিন্তু আগের বিক্রির হিসাব থেকে যাবে।</li>
+    <li><b>পিন বদলালে</b> পুরোনো পিন সব ডিভাইসেই বন্ধ হয়ে যায়, ইন্টারনেট না থাকা ডিভাইসেও পরের বার সংযোগ পেলেই।</li>
+  </ul>
+  <div class="box warn"><b class="t">একটাই পিন সবাই মিলে নয়</b>সবাই মালিকের পিন দিয়ে বিক্রি করলে কে কী করল বোঝা যায় না, টাকা কম পড়লেও খুঁজে পাওয়া যায় না। প্রত্যেকের আলাদা পিন দিন।</div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৮</span><h2>নতুন ডিভাইস যুক্ত করা</h2></div>
+  <p>কাউন্টারের কম্পিউটার, কর্মীর মোবাইল, শাখার ট্যাব: প্রতিটি ডিভাইস দোকানে একবার যুক্ত করতে হয়। এটা মালিক বা ম্যানেজার করবেন।</p>
+  <ol class="steps">
+    <li>নতুন ডিভাইসে দোকানের ঠিকানা খুলুন, যেমন <span class="addr">rahim-store.lalcha.com</span>। অথবা <span class="addr">lalcha.com</span> /*ARROW*/ <span class="btn">সাইন ইন</span> /*ARROW*/ ইমেইল /*ARROW*/ কোড, তারপর দোকান বাছুন।</li>
+    <li>“এই ডিভাইস যুক্ত করুন” পাতায় মালিক বা ম্যানেজারের ইমেইল দিন, <span class="btn">কোড পাঠান</span>।</li>
+    <li>ইমেইলের কোড আর ডিভাইসের একটা নাম (যেমন “কাউন্টার ১”) দিয়ে <span class="btn">ডিভাইস যুক্ত করুন</span>।</li>
+    <li>এখন থেকে এই ডিভাইসে শুধু নাম ট্যাপ করে পিন দিলেই চলবে।</li>
+  </ol>
+  <div class="box tip"><b class="t">ডিভাইস হারালে বা চুরি হলে</b><span class="tab">কর্মী</span> /*ARROW*/ “যুক্ত ডিভাইস” /*ARROW*/ সেই ডিভাইসের পাশে <span class="btn">সংযোগ বাদ দিন</span>। সাথে সাথে সেটা থেকে দোকানে আর ঢোকা যাবে না। প্ল্যান অনুযায়ী ডিভাইসের সীমা আছে (Starter ২টি, Growth ৫টি), পুরোনো ডিভাইস বাদ দিলে নতুনটা যুক্ত করা যায়।</div>
+</section>
+
+<!-- ============ 9 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">৯</span><h2>প্রতিদিন সাইন ইন ও লক</h2></div>
+  <ol class="steps">
+    <li>দোকানের ঠিকানা (বা হোম স্ক্রিনের আইকন) খুলুন।</li>
+    <li>“কে কাজ করছেন?” পাতায় নিজের নামে ট্যাপ করুন।</li>
+    <li>পিন দিয়ে /*CHECK*/ বোতাম চাপুন। বিক্রির পাতা খুলে যাবে।</li>
+  </ol>
+  <ul class="dots">
+    <li><b>১৫ মিনিট কেউ কিছু না ছুঁলে</b> দোকান নিজে থেকে লক হয়ে যায়। কাউন্টার ছেড়ে গেলে ওপরের 🔒 বোতাম চেপে নিজেই লক করে যান।</li>
+    <li><b>৫ বার ভুল পিন</b> দিলে ৫ মিনিট অপেক্ষা করতে হয়, যাতে কেউ আন্দাজে পিন মেলাতে না পারে।</li>
+    <li><b>ইন্টারনেট না থাকলেও</b> সাইন ইন হয়, তবে শর্ত একটাই: এই ডিভাইসে আগে অন্তত একবার ইন্টারনেট থাকা অবস্থায় সাইন ইন করতে হবে।</li>
+    <li>কাজ বদলালে লক করে অন্যজন নিজের নামে ঢুকবেন, এতে কে কোন বিক্রি করল ঠিক থাকে।</li>
+  </ul>
+</section>
+
+<!-- ============ 10 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১০</span><h2>শিফট ও ক্যাশ গোনা</h2></div>
+  <p>শিফট দিয়ে দিন শেষে ড্রয়ারে কত টাকা থাকার কথা আর আসলে কত আছে, মিলিয়ে নেওয়া যায়।</p>
+  <ol class="steps">
+    <li>সকালে ওপরের <span class="btn">শিফট</span> চেপে <span class="btn">শিফট শুরু</span>। “শুরুতে ড্রয়ারের টাকা”-তে খুচরা টাকার পরিমাণ লিখুন।</li>
+    <li>সারাদিন স্বাভাবিকভাবে বিক্রি করুন। নগদ বিক্রি, বাকি আদায়, ফেরত দেওয়া টাকা সব নিজে থেকে হিসাবে যায়।</li>
+    <li>দিন শেষে আবার <span class="btn">শিফট</span> /*ARROW*/ “প্রত্যাশিত টাকা” দেখুন, ড্রয়ারের টাকা গুনে “গণনা করা টাকা”-তে লিখুন।</li>
+    <li><span class="btn">শিফট বন্ধ</span> চাপুন। কম বা বেশি থাকলে “পার্থক্য” দেখাবে, আর রিপোর্টে শিফটের হিসাব থেকে যাবে।</li>
+  </ol>
+</section>
+
+<!-- ============ 11 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১১</span><h2>বিক্রি করা</h2></div>
+  <ol class="steps">
+    <li><span class="tab">বিক্রি</span> পাতায় পণ্যের ছবিতে ট্যাপ করুন, অথবা বারকোড স্ক্যান করুন, অথবা ওপরে নাম লিখে খুঁজুন। পণ্য ডানদিকের “চলতি বিল”-এ উঠবে।</li>
+    <li><b>পরিমাণ:</b> + ও - দিয়ে বাড়ান-কমান। কেজি বা লিটারের পণ্যে ওজন লিখুন, অথবা “টাকার পরিমাণ” লিখুন (যেমন “১০০ টাকার চাল”), দাম নিজেই হিসাব হবে।</li>
+    <li>এক পণ্যের কয়েকটা রূপ থাকলে (প্যাক বা ভ্যারিয়েন্ট) ট্যাপ করলে বাছাই করতে বলবে।</li>
+    <li><b>ছাড়</b> দিতে “ছাড়” ঘরে টাকা লিখুন। কুপন থাকলে কুপন কোড লিখে <span class="btn">লাগান</span>।</li>
+    <li><span class="btn">টাকা নিন</span> চাপুন, পেমেন্টের ধরন বাছুন:
+      <table>
+        <tr><th style="width:28%">ধরন</th><th>যা করবেন</th></tr>
+        <tr><td>নগদ টাকা</td><td>ক্রেতা কত দিলেন লিখুন (বা দ্রুত বোতাম), ফেরতের টাকা নিজেই দেখাবে।</td></tr>
+        <tr><td>বিকাশ / নগদ</td><td>ক্রেতার মেসেজ থেকে ট্রানজেকশন আইডি লিখুন। আইডি ছাড়া বিক্রি হবে না।</td></tr>
+        <tr><td>কার্ড</td><td>কার্ড মেশিনে টাকা নিয়ে নিশ্চিত করুন।</td></tr>
+        <tr><td>বাকি</td><td>ক্রেতা বাছুন বা নতুন যোগ করুন। এখন কিছু দিলে “এখন পরিশোধ”-এ লিখুন, বাকিটা খাতায় উঠবে।</td></tr>
+      </table></li>
+    <li><span class="btn">বিক্রি সম্পন্ন</span> চাপুন। রসিদ দেখাবে: <span class="btn">প্রিন্ট</span> করুন বা ক্রেতাকে দেখান, তারপর <span class="btn">নতুন বিক্রি</span>।</li>
+  </ol>
+  <div class="box tip"><b class="t">পয়েন্ট আর গিফট কার্ড</b>অফার চালু থাকলে পেমেন্টের সময় ক্রেতার নাম বা মোবাইল দিয়ে খুঁজে নিন, প্রতি কেনাকাটায় পয়েন্ট জমবে। জমা পয়েন্ট বা গিফট কার্ডের কোড দিয়ে বিলের কিছু অংশ মেটানো যায়।</div>
+  <div class="box tip"><b class="t">ইন্টারনেট চলে গেলে</b>বিক্রি থামবে না। ওপরে “অফলাইন” আর “পাঠানোর অপেক্ষায়” দেখাবে। সংযোগ ফিরলে সব বিক্রি নিজে থেকে উঠে যাবে। ডিভাইস বন্ধ করবেন না বা ব্রাউজারের ডেটা মুছবেন না, যতক্ষণ “অপেক্ষায়” লেখা থাকে।</div>
+</section>
+
+<!-- ============ 12 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১২</span><h2>বাকির খাতা ও ক্রেতা</h2></div>
+  <ul class="dots">
+    <li><b>ক্রেতা যোগ:</b> <span class="tab">বাকি</span> /*ARROW*/ <span class="btn">ক্রেতা যোগ করুন</span>: নাম, মোবাইল, ঠিকানা। চাইলে “বাকির সীমা (৳)” দিন, তার বেশি বাকিতে দিতে গেলে সতর্ক করবে।</li>
+    <li><b>কার কত বাকি:</b> <span class="tab">বাকি</span> পাতায় সবার তালিকা আর মোট পাওনা। “শুধু যাদের বাকি আছে” দিয়ে ছেঁকে নিন।</li>
+    <li><b>বাকি আদায়:</b> ক্রেতার নাম খুলে <span class="btn">বাকি আদায়</span>, টাকার পরিমাণ আর কীভাবে দিলেন (নগদ, বিকাশ, নগদ, ব্যাংক) লিখুন।</li>
+    <li>ক্রেতার নাম খুললে তাঁর প্রতিটি বাকি বিক্রি আর পরিশোধের তারিখসহ হিসাব দেখা যায়, ক্রেতাকে দেখাতেও পারবেন।</li>
+  </ul>
+  <div class="box warn"><b class="t">বাকির সীমা পেরোলে</b>ক্যাশিয়ার সীমার বেশি বাকিতে বিক্রি করতে পারবেন না, ম্যানেজার বা মালিককে করতে হবে।</div>
+</section>
+
+<!-- ============ 13 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৩</span><h2>ফেরত নেওয়া</h2></div>
+  <ol class="steps">
+    <li><span class="tab">ফেরত</span> খুলে রসিদ নম্বর দিয়ে বিক্রিটা খুঁজুন।</li>
+    <li>কোন পণ্য কতটা ফেরত আসছে বাছুন। ভালো মাল হলে “তাকে ফেরত যাবে” টিক থাকুক, নষ্ট হলে টিক তুলে দিন।</li>
+    <li>বাকির বিক্রি হলে ফেরতের টাকা নিজে থেকে বাকি থেকে বাদ যায়। বাকিটা কীভাবে ফেরত দিলেন বাছুন।</li>
+    <li><span class="btn">ফেরত নিশ্চিত করুন</span>। ফেরত রসিদ প্রিন্ট করা যায়।</li>
+  </ol>
+</section>
+
+<!-- ============ 14 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৪</span><h2>ক্রয় ও সরবরাহকারী</h2></div>
+  <p>সরবরাহকারীর (মহাজন) কাছ থেকে মাল কেনা এখানে লিখলে স্টক, গড় ক্রয়মূল্য আর কার কাছে কত দেনা, সব ঠিক থাকে।</p>
+  <ol class="steps">
+    <li><span class="tab">ক্রয়</span> /*ARROW*/ <span class="btn">নতুন ক্রয়</span>। সরবরাহকারী বাছুন, না থাকলে + চেপে নাম দিয়ে যোগ করুন।</li>
+    <li>ইনভয়েস নম্বর (ঐচ্ছিক) আর ক্রয়ের তারিখ দিন।</li>
+    <li>পণ্য খুঁজে বা স্ক্যান করে যোগ করুন, প্রতিটির পরিমাণ আর একক দাম দিন। ছাড় থাকলে লিখুন।</li>
+    <li>মাল হাতে পেয়ে গেলে “মাল এখন পেয়েছি (স্টকে যোগ হবে)” টিক রাখুন। শুধু অর্ডার দিলে টিক তুলে দিন, মাল এলে পরে গ্রহণ করবেন।</li>
+    <li>এখন কিছু টাকা দিলে “এখন পরিশোধ”-এ লিখুন, বাকিটা সরবরাহকারীর পাওনায় উঠবে। <span class="btn">সেভ করুন</span>।</li>
+  </ol>
+  <h3>পরে যা যা করা যায়</h3>
+  <ul class="dots">
+    <li><b>মাল এলে:</b> ক্রয়টা খুলে “এখন এসেছে”-তে কতটা এল লিখে <span class="btn">মাল গ্রহণ করুন</span>। আংশিক এলে আংশিকই লিখুন। বাকি মাল আর না এলে “বন্ধ করুন: বাকি মাল আসবে না”।</li>
+    <li><b>সরবরাহকারীকে টাকা দিলে:</b> সরবরাহকারীর নাম খুলে <span class="btn">পরিশোধ যোগ করুন</span>। দেনার বেশি দিলে সেটা অগ্রিম হিসেবে থাকে।</li>
+    <li><b>নষ্ট বা ভুল মাল ফেরত দিলে:</b> ক্রয় খুলে <span class="btn">সরবরাহকারীকে ফেরত</span>।</li>
+    <li><b>ভুল করে ক্রয় লিখে ফেললে:</b> <span class="btn">এই ক্রয় বাতিল করুন</span> (মাল বিক্রি হয়ে গেলে আর বাতিল করা যায় না)।</li>
+    <li><b>ওষুধ বা মেয়াদওয়ালা মাল:</b> ব্যাচ চালু থাকলে মাল গ্রহণের সময় ব্যাচ নম্বর আর মেয়াদের তারিখ দিন। <b>মোবাইল:</b> প্রতিটির আইএমইআই স্ক্যান করুন।</li>
+  </ul>
+</section>
+
+<!-- ============ 15 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৫</span><h2>শাখা ও স্টক স্থানান্তর</h2></div>
+  <p>একাধিক দোকান বা গুদাম থাকলে প্রতিটিকে শাখা হিসেবে যোগ করুন, প্রতিটির স্টক আলাদা থাকবে।</p>
+  <ol class="steps">
+    <li><span class="tab">শাখা</span> /*ARROW*/ <span class="btn">শাখা যোগ করুন</span>: নাম আর ঠিকানা।</li>
+    <li>নতুন শাখার ডিভাইস যুক্ত করার সময় সেই শাখা বাছুন (প্রতিটি ডিভাইস একটা শাখার)।</li>
+    <li>মাল পাঠাতে: <span class="btn">নতুন স্থানান্তর</span> /*ARROW*/ কোথা থেকে, কোথায়, কোন পণ্য কতটা /*ARROW*/ <span class="btn">স্টক পাঠান</span>। অন্য শাখা মাল পেয়ে গ্রহণ করলে সেখানে স্টকে যোগ হবে।</li>
+  </ol>
+  <p>শাখার সংখ্যা প্ল্যান অনুযায়ী: Starter ১টি, Growth ৩টি, বড় ব্যবসার জন্য Enterprise।</p>
+</section>
+
+<!-- ============ 16 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৬</span><h2>রিপোর্ট, খরচ ও হিসাব</h2></div>
+  <h3>রিপোর্ট</h3>
+  <p><span class="tab">রিপোর্ট</span>-এ আজ, ৭ দিন, এই মাস বা নিজের বাছাই করা সময়ের হিসাব: নিট বিক্রি, মোট লাভ, বিলের সংখ্যা, গড় বিল, ছাড়, ফেরত, ভ্যাট, বাকি দেওয়া ও আদায়, নগদ-বিকাশ-নগদ-কার্ডে কত এল, সেরা পণ্য, কর্মীভিত্তিক বিক্রি, কম স্টক আর শিফটের হিসাব। এক্সেল বা পিডিএফে নামানো যায়।</p>
+  <h3>খরচ ও আসল লাভ</h3>
+  <ol class="steps">
+    <li><span class="tab">হিসাব</span> /*ARROW*/ “খরচ” /*ARROW*/ কিসের খরচ (দোকানভাড়া, বেতন, বিদ্যুৎ বিল ইত্যাদি), টাকা, তারিখ, কীভাবে দিলেন /*ARROW*/ <span class="btn">খরচ লিখুন</span>।</li>
+    <li>“লাভ-ক্ষতি”-তে দেখুন: বিক্রি থেকে ফেরত, ভ্যাট আর মালের ক্রয়মূল্য বাদ দিয়ে মোট লাভ, তারপর খরচ আর নষ্ট মাল বাদে <b>নিট লাভ</b>।</li>
+    <li>“ক্যাশবুক”-এ প্রতিটি টাকার আসা-যাওয়া আর স্থিতি।</li>
+    <li>হিসাবরক্ষককে দিতে <span class="btn">এক্সেল / ট্যালির জন্য নামান</span>।</li>
+  </ol>
+  <h3>কার্যক্রম</h3>
+  <p><span class="tab">কার্যক্রম</span>-এ কে কখন কী করল (দাম বদল, স্টক বদল, ফেরত, কর্মী যোগ, পিন বদল) সব লেখা থাকে। কিছু গোলমাল মনে হলে এখানে দেখুন।</p>
+</section>
+
+<!-- ============ 17 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৭</span><h2>দোকান অনুযায়ী বিশেষ ফিচার</h2></div>
+  <p>এগুলো শুধু সেটিংসে চালু থাকলে দেখা যায়।</p>
+  <div class="two">
+    <div class="card"><h4>💊 ব্যাচ ও মেয়াদ</h4>পণ্যের ফর্মে “স্টকের হিসাব রাখবেন”-এ “ব্যাচ ও মেয়াদ ধরে” বাছুন, জেনেরিক নামও দিন। মাল গ্রহণের সময় ব্যাচ আর মেয়াদ লিখুন। যেটার মেয়াদ আগে শেষ, সেটাই আগে বিক্রি হয়। <span class="tab">মেয়াদ</span> পাতায় শিগগির মেয়াদ শেষ হবে এমন মাল দেখুন, মেয়াদোত্তীর্ণ মাল <span class="btn">বাদ দিন</span>।</div>
+    <div class="card"><h4>📱 সিরিয়াল ও ওয়ারেন্টি</h4>পণ্যে “প্রতিটির সিরিয়াল / আইএমইআই ধরে” আর ওয়ারেন্টির মাস দিন। কেনার সময় আর বিক্রির সময় আইএমইআই স্ক্যান করুন, রসিদে সিরিয়াল আর ওয়ারেন্টির তারিখ ছাপা হবে। <span class="tab">ওয়ারেন্টি</span> পাতায় আইএমইআই খুঁজলে কে কবে কিনেছে দেখাবে।</div>
+    <div class="card"><h4>🍽️ রেস্টুরেন্ট</h4><span class="tab">সেটিংস</span>-এ টেবিলগুলো যোগ করুন, খাবারে “বাড়তি অপশন” (বাড়তি চিজ +৳৩০)। বিক্রির পাতার ওপরে টেবিল বাছুন, অর্ডার নিন, <span class="btn">খোলা রাখুন</span> বা <span class="btn">কিচেনে পাঠান</span>। খাওয়া শেষে <span class="btn">টাকা নিন</span>।</div>
+    <div class="card"><h4>🎁 অফার</h4><span class="tab">অফার</span> /*ARROW*/ কুপন: কোড, শতাংশ বা টাকা ছাড়, সর্বনিম্ন বিল, শেষ তারিখ। গিফট কার্ড: টাকার পরিমাণ দিয়ে <span class="btn">গিফট কার্ড বিক্রি</span>। পয়েন্টের হার <span class="tab">সেটিংস</span>-এ।</div>
+  </div>
+</section>
+
+<!-- ============ 18 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৮</span><h2>পিন, ইমেইল ও নিরাপত্তা</h2></div>
+  <h3>নিজের পিন বা ইমেইল বদলানো</h3>
+  <p><span class="tab">আমার অ্যাকাউন্ট</span> /*ARROW*/ “পিন বদলান”: এখনকার পিন, তারপর নতুন পিন দুবার। ইমেইল বদলাতে নতুন ইমেইল আর এখনকার পিন দিন, নতুন ইমেইলে আসা কোড দিলে তবেই বদলাবে। পুরোনো ইমেইলেও একটা খবর যাবে।</p>
+  <h3>মালিক বা ম্যানেজার পিন ভুলে গেলে</h3>
+  <ol class="steps">
+    <li>“কে কাজ করছেন?” পাতায় নিজের নামে ট্যাপ করুন, পিনের নিচে <b>“পিন ভুলে গেছেন?”</b> চাপুন।</li>
+    <li>নিজের ইমেইল দিয়ে <span class="btn">কোড পাঠান</span>।</li>
+    <li>ইমেইলের কোড আর নতুন পিন দুবার দিয়ে <span class="btn">নতুন পিন সেভ করুন</span>। সরাসরি ঢুকে যাবেন, আর পুরোনো পিন সব ডিভাইসে বন্ধ হয়ে যাবে।</li>
+  </ol>
+  <p>ক্যাশিয়ার পিন ভুলে গেলে মালিক বা ম্যানেজার <span class="tab">কর্মী</span> থেকে নতুন পিন দেবেন।</p>
+  <div class="box warn"><b class="t">নিরাপদ থাকতে</b>
+    পিন বা ইমেইলের কোড কাউকে বলবেন না। Lalcha-র কেউ কখনো ফোন করে কোড চাইবে না। ডিভাইস হারালে সাথে সাথে সংযোগ বাদ দিন। কর্মী চলে গেলে নিষ্ক্রিয় করুন। দোকান ছাড়ার সময় 🔒 চেপে লক করুন।
+  </div>
+</section>
+
+<!-- ============ 19 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">১৯</span><h2>কর্মীদের হাতে দোকান বুঝিয়ে দেওয়া</h2></div>
+  <p>দোকান সাজানো হয়ে গেলে কর্মীদের হাতে তুলে দেওয়ার আগে এই তালিকা ধরে মিলিয়ে নিন।</p>
+  <div class="two">
+    <div>
+      <h3>দোকান চালু করার আগে</h3>
+      <ul class="checklist">
+        <li>দোকানের নাম, লোগো, ঠিকানা আর ফোন সেভ করা আছে</li>
+        <li>সব পণ্যের দাম, একক আর শুরুর স্টক ঠিক আছে</li>
+        <li>কাউন্টারের প্রতিটি ডিভাইস যুক্ত করা আছে</li>
+        <li>প্রিন্টার থাকলে টেস্ট প্রিন্ট হয়েছে</li>
+        <li>প্রত্যেক কর্মীর আলাদা নাম, ভূমিকা আর নিজের পিন আছে</li>
+        <li>ম্যানেজারদের ইমেইল দেওয়া আছে</li>
+        <li>বাকির পুরোনো খাতা থেকে ক্রেতা আর বাকি তোলা হয়েছে</li>
+      </ul>
+    </div>
+    <div>
+      <h3>কর্মীকে যা শেখাবেন</h3>
+      <ul class="checklist">
+        <li>নিজের নামে ট্যাপ করে নিজের পিনে ঢোকা, কাউন্টার ছাড়লে লক</li>
+        <li>শিফট শুরু আর দিন শেষে ক্যাশ গুনে শিফট বন্ধ</li>
+        <li>ছবি বা বারকোডে বিক্রি, ওজনের পণ্য, ছাড়</li>
+        <li>বিকাশ-নগদে ট্রানজেকশন আইডি লেখা</li>
+        <li>বাকিতে বিক্রি আর বাকি আদায়</li>
+        <li>ইন্টারনেট গেলে কী দেখায়, আর ব্রাউজারের ডেটা না মোছা</li>
+        <li>একটা পরীক্ষামূলক বিক্রি করে ফেরত নেওয়া (ম্যানেজার)</li>
+      </ul>
+    </div>
+  </div>
+  <h3>প্রতিদিনের হস্তান্তর (শিফট বদল)</h3>
+  <ol class="steps">
+    <li>যিনি যাচ্ছেন: ড্রয়ারের টাকা গুনে <span class="btn">শিফট বন্ধ</span>, তারপর 🔒 লক।</li>
+    <li>যিনি আসছেন: নিজের নামে ঢুকে <span class="btn">শিফট শুরু</span>, ড্রয়ারে যত টাকা রেখে গেছেন সেটাই শুরুর টাকা।</li>
+    <li>পার্থক্য থাকলে সাথে সাথে মালিক বা ম্যানেজারকে জানান। রিপোর্টে প্রতিটি শিফট আলাদা দেখা যায়।</li>
+  </ol>
+  <h3>ম্যানেজার বদল বা কর্মী চলে গেলে</h3>
+  <ul class="dots">
+    <li>যিনি চলে যাচ্ছেন তাঁকে <span class="tab">কর্মী</span> থেকে নিষ্ক্রিয় করুন। তাঁর নিজের মোবাইল যুক্ত থাকলে সেটার সংযোগ বাদ দিন।</li>
+    <li>নতুন জনকে আলাদা নাম, ভূমিকা আর নিজের পিন দিয়ে যোগ করুন। ম্যানেজার হলে তাঁর নিজের ইমেইল দিন।</li>
+    <li>দোকানের মালিকানা অন্য কারো নামে দিতে হলে (দোকান বিক্রি বা হস্তান্তর) <b>support@lalcha.com</b>-এ লিখুন, আমরা যাচাই করে বদলে দেব।</li>
+  </ul>
+</section>
+
+<!-- ============ 20 ============ -->
+<section class="chapter flow">
+  <div class="chead"><span class="num">২০</span><h2>বিলিং, ইন্টারনেট ও সাহায্য</h2></div>
+  <h3>সাবস্ক্রিপশন ও পেমেন্ট</h3>
+  <table>
+    <tr><th>প্ল্যান</th><th>মাসিক</th><th>ডিভাইস</th><th>শাখা</th></tr>
+    <tr><td>Starter</td><td>৳৪৯৯</td><td>২টি</td><td>১টি</td></tr>
+    <tr><td>Growth</td><td>৳৯৯৯</td><td>৫টি</td><td>৩টি</td></tr>
+    <tr><td>Enterprise</td><td colspan="3">চেইন শপ বা বড় ব্যবসার জন্য আলাদা ব্যবস্থা, যোগাযোগ করুন</td></tr>
+  </table>
+  <ol class="steps">
+    <li>প্রথম ১৪ দিন ফ্রি। শেষ হওয়ার আগে ওপরে লাল দাগে মনে করিয়ে দেবে।</li>
+    <li>মালিক <span class="tab">বিলিং</span> খুলে প্ল্যান আর কত মাস বাছুন, দেখানো নম্বরে বিকাশ বা নগদে টাকা পাঠান।</li>
+    <li>ট্রানজেকশন আইডি দিয়ে <span class="btn">পেমেন্ট জমা দিন</span>। আমরা যাচাই করে অনুমোদন দিলে মেয়াদ বেড়ে যাবে।</li>
+    <li>মেয়াদ শেষ হলেও ৭ দিন সময় থাকে। এরপর নবায়ন না করা পর্যন্ত বিক্রি বন্ধ থাকে, কিন্তু আপনার সব তথ্য নিরাপদে থেকে যায়।</li>
+  </ol>
+  <h3>ইন্টারনেট না থাকলে</h3>
+  <p>বিক্রি, বাকিতে দেওয়া, বাকি আদায়, ফেরত আর শিফট ইন্টারনেট ছাড়াই চলে, সংযোগ ফিরলে নিজে থেকে উঠে যায়। পণ্য যোগ-বদল, কর্মী, রিপোর্ট, ক্রয় আর সেটিংস বদলাতে ইন্টারনেট লাগে।</p>
+  <h3>আপনার তথ্য</h3>
+  <p>প্রতিটি দোকানের তথ্য আলাদা রাখা হয়, শুধু আপনার দোকানের মানুষই দেখতে পান। প্রতি রাতে এনক্রিপ্ট করে আলাদা জায়গায় ব্যাকআপ রাখা হয়।</p>
+  <div class="end">
+    <h3>সাহায্য লাগলে</h3>
+    <p>ইমেইল: <b class="en">support@lalcha.com</b> · যোগাযোগ ফর্ম: <b class="en">lalcha.com/contact</b><br>পিন ও কোড কখনো কাউকে দেবেন না। সমস্যা লিখলে দোকানের ঠিকানা (যেমন rahim-store.lalcha.com) আর কী হয়েছে, স্ক্রিনশটসহ জানালে দ্রুত সমাধান করতে পারব।</p>
+    <div class="brand" style="margin-top:5mm">/*MARK:10*/<span class="word" style="font-size:18pt;color:#FFFDF6">Lalcha</span><span class="pos" style="font-size:9pt;color:#12130F">POS</span></div>
+  </div>
+</section>
+
+</body>
+</html>
