@@ -1,0 +1,8 @@
+# Installed as /etc/cron.d/lalcha by ops/deploy.sh. Every job runs under lalcha-watch, which emails when one fails.
+# Wipes and reloads the public demo shop every hour.
+0 * * * * root /usr/local/bin/lalcha-watch run demo-reset /usr/local/bin/lalcha-db demo-reset >> /var/log/lalcha-demo.log 2>&1
+# Nightly encrypted backup to R2 (keeps 14 days, then one a month for a year), then cleanup.
+15 3 * * * root /usr/local/bin/lalcha-watch run backup /usr/local/bin/lalcha-maint backup >> /var/log/lalcha-maint.log 2>&1
+45 3 * * * root /usr/local/bin/lalcha-watch run cleanup /usr/local/bin/lalcha-maint cleanup >> /var/log/lalcha-maint.log 2>&1
+# Every five minutes: is the site up, is the API up, is the demo up, did the backup run, is the disk filling.
+*/5 * * * * root /usr/local/bin/lalcha-watch check >> /var/log/lalcha-watch.log 2>&1

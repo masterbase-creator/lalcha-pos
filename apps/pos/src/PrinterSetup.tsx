@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { connectPrinter, directPrintSupported, openDrawer, printDirect, printerReady, reconnectPrinter } from "./escpos";
+import { connectPrinter, directPrintSupported, printerKinds, openDrawer, printDirect, printerReady, reconnectPrinter } from "./escpos";
 import type { StringKey } from "./i18n";
 
 export type Printing = { receiptPrinter: "browser" | "direct"; paperWidth: 58 | 80; cashDrawer: boolean; kitchenTickets: boolean };
@@ -9,12 +9,13 @@ export function PrinterSetup({ value, restaurant, t, onChange }: { value: Printi
   const [connected, setConnected] = useState(printerReady());
   const [message, setMessage] = useState("");
   const supported = directPrintSupported();
+  const kinds = printerKinds();
 
   useEffect(() => {
     if (value.receiptPrinter === "direct") void reconnectPrinter().then(setConnected);
   }, [value.receiptPrinter]);
 
-  async function connect(kind: "usb" | "serial") {
+  async function connect(kind: "usb" | "serial" | "bluetooth") {
     setMessage("");
     try {
       await connectPrinter(kind);
@@ -59,8 +60,9 @@ export function PrinterSetup({ value, restaurant, t, onChange }: { value: Printi
         <div className="space-y-2 border-[3px] border-line p-3">
           <p className="font-bold">{connected ? `✓ ${t("printerConnected")}` : t("printerNotConnected")}</p>
           <div className="grid grid-cols-2 gap-2">
-            <button type="button" className="min-h-12 border-[3px] border-line font-black" onClick={() => void connect("usb")}>{t("connectPrinter")} (USB)</button>
-            <button type="button" className="min-h-12 border-[3px] border-line font-black" onClick={() => void connect("serial")}>{t("connectPrinter")} (COM)</button>
+            {kinds.bluetooth && <button type="button" className="col-span-2 min-h-12 border-[3px] border-line font-black" onClick={() => void connect("bluetooth")}>{t("connectPrinter")} (Bluetooth)</button>}
+            {kinds.usb && <button type="button" className="min-h-12 border-[3px] border-line font-black" onClick={() => void connect("usb")}>{t("connectPrinter")} (USB)</button>}
+            {kinds.serial && <button type="button" className="min-h-12 border-[3px] border-line font-black" onClick={() => void connect("serial")}>{t("connectPrinter")} (COM)</button>}
             <button type="button" disabled={!connected} className="min-h-12 border-[3px] border-line font-black disabled:opacity-40" onClick={() => void test()}>{t("testPrint")}</button>
             <button type="button" disabled={!connected} className="min-h-12 border-[3px] border-line font-black disabled:opacity-40" onClick={() => void openDrawer().catch(() => setMessage(t("printerFailed")))}>{t("openDrawer")}</button>
           </div>

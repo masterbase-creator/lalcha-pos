@@ -1,4 +1,5 @@
-// Direct printing to ESC/POS thermal receipt printers over Web Serial or WebUSB (Chrome and Edge).
+// Direct printing to ESC/POS thermal receipt printers over Web Serial, WebUSB or Bluetooth (Chrome and
+// Edge). Bluetooth is what Android phones and tablets use with small portable printers.
 // Most cheap printers have no Bangla font, so every receipt is drawn on a canvas in the app's own
 // font and sent as a picture. The same connection kicks the cash drawer plugged into the printer.
 
@@ -18,14 +19,23 @@ type UsbDeviceLike = {
   opened: boolean; productName?: string; configuration: { interfaces: { interfaceNumber: number; alternate: { endpoints: { direction: string; type: string; endpointNumber: number }[] } }[] } | null;
   open(): Promise<void>; selectConfiguration(n: number): Promise<void>; claimInterface(n: number): Promise<void>; transferOut(ep: number, data: BufferSource): Promise<unknown>;
 };
+type BleCharacteristic = { properties: { write: boolean; writeWithoutResponse: boolean }; writeValueWithoutResponse(d: BufferSource): Promise<void>; writeValueWithResponse(d: BufferSource): Promise<void> };
+type BleDevice = {
+  name?: string;
+  gatt?: { connected: boolean; connect(): Promise<{ getPrimaryServices(): Promise<{ getCharacteristics(): Promise<BleCharacteristic[]> }[]> }> };
+};
+/** Services that cheap Bluetooth receipt printers (58 mm and 80 mm "BLE" models) expose for printing. */
+const BLE_SERVICES = ["000018f0-0000-1000-8000-00805f9b34fb", "0000ff00-0000-1000-8000-00805f9b34fb", "0000ffe0-0000-1000-8000-00805f9b34fb", "0000fff0-0000-1000-8000-00805f9b34fb", "49535343-fe7d-4ae5-8fa9-9fafd205e455", "e7810a71-73ae-499d-8c15-faa9aef0c3f2"];
 const nav = navigator as Navigator & {
+  bluetooth?: { requestDevice(o: object): Promise<BleDevice>; getDevices?: () => Promise<BleDevice[]> };
   serial?: { requestPort(): Promise<SerialPortLike>; getPorts(): Promise<SerialPortLike[]> };
   usb?: { requestDevice(o: { filters: object[] }): Promise<UsbDeviceLike>; getDevices(): Promise<UsbDeviceLike[]> };
 };
 
 let writer: Writer | null = null;
 
-export const directPrintSupported = () => Boolean(nav.serial || nav.usb);
+export const directPrintSupported = () => Boolean(nav.serial || nav.usb || nav.bluetooth);
+export const printerKinds = () => ({ usb: Boolean(nav.usb), serial: Boolean(nav.serial), bluetooth: Boolean(nav.bluetooth) });
 export const printerReady = () => writer !== null;
 
 async function fromSerial(port: SerialPortLike): Promise<Writer> {
@@ -61,9 +71,40 @@ async function fromUsb(device: UsbDeviceLike): Promise<Writer> {
   throw new Error("This USB device has no printer connection.");
 }
 
+let bleDevice: BleDevice | null = null;
+async function fromBluetooth(device: BleDevice): Promise<Writer> {
+  if (!device.gatt) throw new Error("This Bluetooth device can't print.");
+  const find = async () => {
+    const server = await device.gatt!.connect();
+    for (const service of await server.getPrimaryServices()) {
+      const out = (await service.getCharacteristics()).find((c) => c.properties.writeWithoutResponse || c.properties.write);
+      if (out) return out;
+    }
+    throw new Error("This Bluetooth device has no printer connection.");
+  };
+  let out = await find();
+  bleDevice = device;
+  return {
+    label: device.name || "Bluetooth printer",
+    write: async (data) => {
+      // Printers sleep and drop the link between receipts; pick it up again before printing.
+      if (!device.gatt!.connected) out = await find();
+      // Bluetooth carries little at a time. Small pieces with a short pause keep slow printers from losing rows.
+      for (let i = 0; i < data.length; i += 180) {
+        const piece = data.slice(i, i + 180);
+        if (out.properties.writeWithoutResponse) {
+          await out.writeValueWithoutResponse(piece);
+          if (i % 1800 === 0) await new Promise((r) => setTimeout(r, 20));
+        } else await out.writeValueWithResponse(piece);
+      }
+    },
+  };
+}
+
 /** Asks the person to pick a printer. Must run from a tap or click. */
-export async function connectPrinter(kind: "usb" | "serial") {
-  if (kind === "usb" && nav.usb) writer = await fromUsb(await nav.usb.requestDevice({ filters: [{ classCode: 7 }, {}] }));
+export async function connectPrinter(kind: "usb" | "serial" | "bluetooth") {
+  if (kind === "bluetooth" && nav.bluetooth) writer = await fromBluetooth(await nav.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: BLE_SERVICES }));
+  else if (kind === "usb" && nav.usb) writer = await fromUsb(await nav.usb.requestDevice({ filters: [{ classCode: 7 }, {}] }));
   else if (nav.serial) writer = await fromSerial(await nav.serial.requestPort());
   else throw new Error("unsupported");
   return writer.label;
@@ -78,6 +119,11 @@ export async function reconnectPrinter() {
     else {
       const ports = (await nav.serial?.getPorts()) ?? [];
       if (ports[0]) writer = await fromSerial(ports[0]);
+      else {
+        // Browsers that remember Bluetooth devices give the printer back without asking again.
+        const remembered = bleDevice ?? (await nav.bluetooth?.getDevices?.())?.[0];
+        if (remembered) writer = await fromBluetooth(remembered);
+      }
     }
   } catch {
     writer = null;

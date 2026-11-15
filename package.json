@@ -6,7 +6,9 @@
     "db:setup": "pnpm --filter @lalcha/api db:setup",
     "test": "pnpm --filter @lalcha/domain test",
     "typecheck": "pnpm -r typecheck",
-    "start": "pnpm --filter @lalcha/pos build && DEMO_URL=http://demo.localhost:4173/ pnpm --filter @lalcha/web build && pnpm --parallel --filter @lalcha/api --filter @lalcha/pos --filter @lalcha/web run serve"
+    "start": "pnpm --filter @lalcha/pos build && DEMO_URL=http://demo.localhost:4173/ pnpm --filter @lalcha/web build && pnpm --parallel --filter @lalcha/api --filter @lalcha/pos --filter @lalcha/web run serve",
+    "e2e": "node tests/e2e/security.mjs && node tests/e2e/journey.mjs",
+    "e2e:live": "E2E_SCHEME=https E2E_DOMAIN=lalcha.com node tests/e2e/security.mjs"
   },
   "packageManager": "pnpm@9.15.9",
   "version": "0.1.0",

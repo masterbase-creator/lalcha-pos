@@ -5,7 +5,7 @@ import { listObjects, putObject } from "./storage.ts";
 import { and, eq } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { hashPin } from "./secrets.ts";
-import { branches, customerPayments, customers, productPacks, products, saleLines, sales, stockLedger, stores, subscriptions, suppliers, users, coupons, expenses, storeSettings } from "./schema.ts";
+import { branches, customerPayments, customers, productPacks, productSerials, products, restaurantTables, stockBatches, saleLines, sales, stockLedger, stores, subscriptions, suppliers, users, coupons, expenses, storeSettings } from "./schema.ts";
 
 /** Staff of the sample stores. The demo PINs are public: they are shown on the demo's sign-in screen. */
 export const DEMO_STAFF = {
@@ -17,7 +17,7 @@ export const DEMO_STAFF = {
   other: [["owner", "Other Owner", "01711000009", "owner", "6143", "owner@other.test"]],
 } as const;
 
-type Shape = "sack" | "bottle" | "box" | "can" | "jar" | "packet" | "tube" | "produce" | "tray";
+type Shape = "sack" | "bottle" | "box" | "can" | "jar" | "packet" | "tube" | "produce" | "tray" | "phone" | "plate" | "cup";
 
 /** Sample catalogue: generic items with drawn placeholder pictures, until real photos are uploaded. */
 export const SEED: [string, string, string, string, number, number, Shape, string][] = [
@@ -94,6 +94,12 @@ function pack(shape: Shape, c: string) {
       return `<path d="M104 64 H296 L256 310 H144Z" ${s}/><rect x="162" y="310" width="76" height="48" rx="8" fill="${ink}"/><rect x="130" y="130" width="140" height="94" rx="8" ${band}/>`;
     case "produce":
       return `<circle cx="146" cy="244" r="74" ${s}/><circle cx="256" cy="244" r="74" ${s}/><circle cx="200" cy="146" r="78" ${s}/><path d="M200 70 q-6 -24 18 -38" fill="none" stroke="${ink}" stroke-width="8" stroke-linecap="round"/>`;
+    case "phone":
+      return `<rect x="118" y="36" width="164" height="328" rx="26" fill="${ink}"/><rect x="132" y="62" width="136" height="262" rx="8" fill="${c}"/><circle cx="200" cy="344" r="9" fill="#fff"/>`;
+    case "plate":
+      return `<ellipse cx="200" cy="230" rx="160" ry="110" fill="#fff" stroke="${ink}" stroke-width="7"/><ellipse cx="200" cy="222" rx="112" ry="72" ${s}/><path d="M150 210 q50 -40 100 0" fill="none" stroke="${ink}" stroke-width="5"/>`;
+    case "cup":
+      return `<path d="M104 120 H296 L276 330 Q200 356 124 330Z" ${s}/><path d="M292 160 q62 6 44 62 q-14 40 -58 40" fill="none" stroke="${ink}" stroke-width="12"/><path d="M160 96 q-16 -22 0 -44 M210 96 q-16 -22 0 -44 M260 96 q-16 -22 0 -44" fill="none" stroke="${ink}" stroke-width="7" stroke-linecap="round"/>`;
     case "tray": {
       const eggs = [116, 200, 284]
         .flatMap((x) => [140, 244].map((y) => `<ellipse cx="${x}" cy="${y}" rx="36" ry="46" fill="#fff" stroke="${ink}" stroke-width="6"/>`))
@@ -106,7 +112,7 @@ function pack(shape: Shape, c: string) {
 export function artwork(shape: Shape, color: string, label: string) {
   const escaped = label.replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const words = escaped.split(" ").slice(0, 2).join(" ");
-  const onLabel = shape !== "produce" && shape !== "tray";
+  const onLabel = !["produce", "tray", "phone", "plate", "cup"].includes(shape);
   const y = shape === "tube" ? 184 : 232;
   const text = onLabel
     ? `<text x="200" y="${y}" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="${words.length > 12 ? 18 : 24}" font-weight="800" fill="#12130F">${words}</text>`
@@ -172,8 +178,13 @@ export async function seedStore(db: Db, subdomain: "demo" | "other", name: strin
       storeId, id: stableUuid(`user:${subdomain}:${key}`), name: staffName, phone: opts.withPhones ? phone : null, email: opts.withPhones ? email : null, role, pinHash: await hashPin(pin),
     }).onConflictDoUpdate({ target: [users.storeId, users.id], set: { email: opts.withPhones ? email : null } });
   }
-  // Sample stores skip onboarding: a grocery with points and accounts switched on.
-  const shop = { businessType: "grocery" as const, features: ["loyalty", "accounting"] as ("loyalty" | "accounting")[], onboarded: true };
+  // Sample stores skip onboarding. The public demo is a super shop with a medicine corner, a phone
+  // counter and a food corner, so visitors can try expiry dates, IMEI and table orders in one place.
+  const shop = {
+    businessType: "grocery" as const,
+    features: (subdomain === "demo" ? ["loyalty", "accounting", "batches", "serials", "restaurant"] : ["loyalty", "accounting"]) as ("loyalty" | "accounting" | "batches" | "serials" | "restaurant")[],
+    onboarded: true,
+  };
   await db.insert(storeSettings).values({ storeId, ...shop }).onConflictDoUpdate({ target: storeSettings.storeId, set: shop });
   if (subdomain === "other") {
     // A second store with one item, so store isolation can be tested.
@@ -205,6 +216,7 @@ export async function seedStore(db: Db, subdomain: "demo" | "other", name: strin
     }).onConflictDoNothing();
   }
   await seedVariantsAndPacks(db, storeId, mainBranch, pictures);
+  await seedDepartments(db, storeId, mainBranch, pictures);
   await db.insert(coupons).values({ storeId, id: stableUuid("demo:coupon:eid"), code: "EID10", kind: "percent", value: 1000, minSpendPoisha: 50_000, maxDiscountPoisha: 20_000 }).onConflictDoNothing();
   if (!history) return storeId;
   const owner = stableUuid(`user:${subdomain}:${DEMO_STAFF[subdomain][0][0]}`);
@@ -310,4 +322,76 @@ async function seedVariantsAndPacks(db: Db, storeId: string, branchId: string, p
     { storeId, id: stableUuid("pack:rope-roll"), productId: sku("ROPE"), name: "রোল ১০০ ফুট", qty: 100_000, pricePoisha: 45_000, barcode: null },
     { storeId, id: stableUuid("pack:cola-6"), productId: sku("COLA"), name: "৬ ক্যান", qty: 6_000, pricePoisha: 29_000, barcode: null },
   ]).onConflictDoNothing();
+}
+
+/**
+ * The other kinds of shop, inside the demo: medicines with batch and expiry, phones with IMEI and
+ * warranty, a food corner with extras and tables, wholesale prices, and prices that change daily.
+ */
+async function seedDepartments(db: Db, storeId: string, branchId: string, pictures: Awaited<ReturnType<typeof samplePictures>>) {
+  const sku = (k: string) => stableUuid(`demo:${k}`);
+  const opened = new Date(Date.now() - 15 * DAY);
+  const dateIn = (days: number) => new Date(Date.now() + days * DAY).toISOString().slice(0, 10);
+  const base = async (key: string, nameEn: string, nameBn: string, category: string, price: number, shape: Shape, color: string, more: Partial<typeof products.$inferInsert> = {}) => {
+    await pictures.save(`${key}.svg`, artwork(shape, color, nameEn));
+    await db.insert(products).values({ storeId, id: sku(key), sku: key, barcode: null, nameEn, nameBn, category, pricePoisha: price * 100, costPoisha: Math.round(price * 80), imageUrl: `/products/${key}.svg`, ...more }).onConflictDoNothing();
+    return sku(key);
+  };
+
+  // Medicine corner: each has a batch and an expiry; one is close to expiring, so the warning shows.
+  const medicines: [string, string, string, string, number, Shape, string, string, number, number][] = [
+    ["MED-NAPA", "Paracetamol 500mg (strip)", "প্যারাসিটামল ৫০০ মি.গ্রা. (পাতা)", "tablets", 12, "box", "#A8DADC", "Paracetamol", 120, 400],
+    ["MED-OMEP", "Omeprazole 20mg (strip)", "ওমিপ্রাজল ২০ মি.গ্রা. (পাতা)", "tablets", 60, "box", "#CDB4DB", "Omeprazole", 80, 25],
+    ["MED-CETI", "Cetirizine 10mg (strip)", "সেটিরিজিন ১০ মি.গ্রা. (পাতা)", "tablets", 30, "box", "#FFC8DD", "Cetirizine", 60, 300],
+    ["MED-ORS", "Oral Saline (ORS)", "খাবার স্যালাইন", "syrups", 6, "packet", "#FFD166", "ORS", 200, 500],
+    ["MED-SYRUP", "Cough Syrup 100ml", "কাশির সিরাপ ১০০ মিলি", "syrups", 85, "bottle", "#B08968", "Dextromethorphan", 30, 180],
+    ["MED-OINT", "Antiseptic Cream 25g", "অ্যান্টিসেপটিক ক্রিম ২৫ গ্রাম", "topical", 55, "tube", "#90E0EF", "Povidone iodine", 24, 240],
+  ];
+  for (const [key, nameEn, nameBn, category, price, shape, color, generic, qty, expiresIn] of medicines) {
+    const id = await base(key, nameEn, nameBn, category, price, shape, color, { tracking: "batch", genericName: generic });
+    const batchId = stableUuid(`batch:${id}`);
+    await db.insert(stockBatches).values({ storeId, id: batchId, productId: id, branchId, batchNo: `B${key.slice(4)}24`, expiresOn: dateIn(expiresIn) }).onConflictDoNothing();
+    await db.insert(stockLedger).values({ storeId, branchId, id: stableUuid(`opening:${id}`), productId: id, qtyDelta: qty * 1000, reason: "opening", batchId, occurredAt: opened }).onConflictDoNothing();
+  }
+
+  // Phone counter: sold by IMEI, with a warranty printed on the receipt.
+  const gadgets: [string, string, string, string, number, Shape, string, number, number][] = [
+    ["MOB-SMART", "Smartphone 6GB/128GB", "স্মার্টফোন ৬/১২৮ জিবি", "mobiles", 18500, "phone", "#4361EE", 12, 4],
+    ["MOB-BUTTON", "Button Phone", "বাটন ফোন", "mobiles", 1450, "phone", "#2EC4B6", 12, 5],
+    ["MOB-EARBUD", "Wireless Earbuds", "ওয়্যারলেস ইয়ারবাড", "gadget_accessories", 1200, "box", "#F1FAEE", 6, 3],
+  ];
+  for (const [key, nameEn, nameBn, category, price, shape, color, months, count] of gadgets) {
+    const id = await base(key, nameEn, nameBn, category, price, shape, color, { tracking: "serial", warrantyMonths: months });
+    await db.insert(stockLedger).values({ storeId, branchId, id: stableUuid(`opening:${id}`), productId: id, qtyDelta: count * 1000, reason: "opening", occurredAt: opened }).onConflictDoNothing();
+    for (let i = 1; i <= count; i += 1) {
+      await db.insert(productSerials).values({ storeId, id: stableUuid(`serial:${id}:${i}`), productId: id, serial: `35${String(parseInt(id.slice(0, 6), 16)).padStart(8, "0").slice(0, 8)}${String(i).padStart(5, "0")}`, branchId, status: "in_stock" }).onConflictDoNothing();
+    }
+  }
+  const charger = await base("MOB-CHARGER", "Fast Charger 18W", "ফাস্ট চার্জার ১৮ ওয়াট", "gadget_accessories", 350, "box", "#E9C46A");
+  await db.insert(stockLedger).values({ storeId, branchId, id: stableUuid(`opening:${charger}`), productId: charger, qtyDelta: 30_000, reason: "opening", occurredAt: opened }).onConflictDoNothing();
+
+  // Food corner: extras on a dish, and tables to keep orders open.
+  const extra = (name: string, price: number) => ({ id: stableUuid(`mod:${name}`), name, pricePoisha: price * 100 });
+  const dishes: [string, string, string, string, number, Shape, string, ReturnType<typeof extra>[]][] = [
+    ["FOOD-KACCHI", "Kacchi Biryani", "কাচ্চি বিরিয়ানি", "meals", 280, "plate", "#E9C46A", [extra("বোরহানি", 40), extra("বাড়তি মাংস", 120)]],
+    ["FOOD-BHUNA", "Beef Bhuna with Rice", "গরু ভুনা ও ভাত", "meals", 220, "plate", "#9C6644", [extra("বাড়তি ভাত", 20)]],
+    ["FOOD-BURGER", "Chicken Burger", "চিকেন বার্গার", "fast_food", 180, "plate", "#F4A261", [extra("চিজ", 30), extra("ডাবল প্যাটি", 80)]],
+    ["FOOD-FRIES", "French Fries", "ফ্রেঞ্চ ফ্রাই", "fast_food", 90, "plate", "#FFD60A", []],
+    ["FOOD-TEA", "Milk Tea", "দুধ চা", "tea_coffee", 20, "cup", "#B3261E", [extra("চিনি ছাড়া", 0), extra("কড়া লিকার", 0)]],
+    ["FOOD-COFFEE", "Hot Coffee", "গরম কফি", "tea_coffee", 60, "cup", "#6F4518", []],
+    ["FOOD-FIRNI", "Firni", "ফিরনি", "desserts", 50, "cup", "#F8EDEB", []],
+  ];
+  for (const [key, nameEn, nameBn, category, price, shape, color, modifiers] of dishes) {
+    const id = await base(key, nameEn, nameBn, category, price, shape, color, { modifiers });
+    await db.insert(stockLedger).values({ storeId, branchId, id: stableUuid(`opening:${id}`), productId: id, qtyDelta: 200_000, reason: "opening", occurredAt: opened }).onConflictDoNothing();
+  }
+  await db.insert(restaurantTables).values(["১", "২", "৩", "৪"].map((name, i) => ({ storeId, id: stableUuid(`demo:table:${i}`), name, seats: 4 }))).onConflictDoNothing();
+
+  // Wholesale prices for dealers, and items whose price is set fresh each morning.
+  for (const [key, wholesale] of [["RICE5", 395], ["SOY1", 182], ["SUGAR1", 118], ["DAL1", 132], ["ATTA2", 122]] as const) {
+    await db.update(products).set({ wholesalePricePoisha: wholesale * 100 }).where(and(eq(products.storeId, storeId), eq(products.id, sku(key))));
+  }
+  for (const key of ["ONION", "POTATO", "EGG12", "TOMATO", "GARLIC", "GCHILI"]) {
+    await db.update(products).set({ dailyRate: true }).where(and(eq(products.storeId, storeId), eq(products.id, sku(key))));
+  }
 }

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs a Lalcha database task (migrate or demo-reset) as the local postgres superuser, over the socket.
+set -e
+cd /srv/lalcha/app/apps/api
+set -a; . /etc/lalcha/api.env; set +a
+case "$1" in
+  migrate) exec sudo -E -u postgres /opt/node/bin/node --import tsx src/migrate.ts ;;
+  demo-reset) exec sudo -E -u postgres /opt/node/bin/node --import tsx src/demo-reset.ts ;;
+  *) echo "usage: lalcha-db migrate|demo-reset"; exit 2 ;;
+esac

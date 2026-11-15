@@ -50,6 +50,8 @@ GRANT SELECT, INSERT, UPDATE ON stock_batches, product_serials, restaurant_table
 GRANT SELECT, INSERT, UPDATE, DELETE ON login_codes TO lalcha_app;
 -- Packs are replaced as a whole when a product is saved.
 GRANT SELECT, INSERT, UPDATE, DELETE ON product_packs TO lalcha_app;
+-- Open restaurant orders are replaced as they change and removed once paid.
+GRANT SELECT, INSERT, UPDATE, DELETE ON open_orders TO lalcha_app;
 GRANT UPDATE (received_qty) ON purchase_lines TO lalcha_app;
 -- No UPDATE or DELETE: sales records and the stock ledger are append-only.
 GRANT SELECT, INSERT ON stock_ledger, sales, sale_lines, purchase_lines, supplier_payments, customer_payments, sale_returns, sale_return_lines, purchase_returns, purchase_return_lines, purchase_receipts, stock_transfer_lines, audit_log, loyalty_ledger, gift_card_ledger TO lalcha_app;
@@ -57,7 +59,7 @@ GRANT SELECT, INSERT ON stock_ledger, sales, sale_lines, purchase_lines, supplie
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['products', 'product_packs', 'stock_ledger', 'sales', 'sale_lines', 'users', 'login_codes', 'devices', 'sessions', 'suppliers', 'purchases', 'purchase_lines', 'supplier_payments', 'customers', 'customer_payments', 'sale_returns', 'sale_return_lines', 'subscriptions', 'subscription_payments', 'store_settings', 'purchase_returns', 'purchase_return_lines', 'shifts', 'branches', 'purchase_receipts', 'stock_transfers', 'stock_transfer_lines', 'audit_log', 'stock_batches', 'product_serials', 'restaurant_tables', 'loyalty_ledger', 'coupons', 'gift_cards', 'gift_card_ledger', 'expenses'] LOOP
+  FOREACH t IN ARRAY ARRAY['products', 'product_packs', 'stock_ledger', 'sales', 'sale_lines', 'users', 'login_codes', 'devices', 'sessions', 'suppliers', 'purchases', 'purchase_lines', 'supplier_payments', 'customers', 'customer_payments', 'sale_returns', 'sale_return_lines', 'subscriptions', 'subscription_payments', 'store_settings', 'purchase_returns', 'purchase_return_lines', 'shifts', 'branches', 'purchase_receipts', 'stock_transfers', 'stock_transfer_lines', 'audit_log', 'stock_batches', 'product_serials', 'restaurant_tables', 'loyalty_ledger', 'coupons', 'gift_cards', 'gift_card_ledger', 'expenses', 'open_orders'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
     EXECUTE format('DROP POLICY IF EXISTS store_isolation ON %I', t);

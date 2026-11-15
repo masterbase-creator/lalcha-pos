@@ -1,0 +1,61 @@
+#!/bin/sh
+# Tells the people who run Lalcha when something breaks, by email.
+#
+#   lalcha-watch run <name> <command...>   run a scheduled job; email if it fails
+#   lalcha-watch check                     look at the site, the API, the demo, the last backup and the disk
+#   lalcha-watch test                      send a test email
+#
+# A problem is emailed once when it starts, again every 6 hours while it lasts, and once when it clears.
+# This runs on the server itself, so it can't report the whole server being off: pair it with an
+# outside uptime check on https://lalcha.com/health (see ops/README.md).
+STATE=/var/lib/lalcha-watch
+DOMAIN="${LALCHA_DOMAIN:-lalcha.com}"
+mkdir -p "$STATE"
+
+alert() { # subject, then details on stdin
+  runuser -u lalcha -- sh -c 'cd /srv/lalcha/app/apps/api && set -a && . /etc/lalcha/api.env && set +a && exec /opt/node/bin/node --import tsx src/alert.ts "$0"' "$1" >> /var/log/lalcha-watch.log 2>&1
+}
+
+# report <name> <ok|fail> <details>
+report() {
+  file="$STATE/$1.failing"
+  if [ "$2" = ok ]; then
+    if [ -f "$file" ]; then rm -f "$file"; echo "$3" | alert "Fixed: $1"; fi
+    return
+  fi
+  now=$(date +%s)
+  last=$(cat "$file" 2>/dev/null || echo 0)
+  if [ $((now - last)) -ge 21600 ]; then echo "$now" > "$file"; echo "$3" | alert "Problem: $1"; fi
+}
+
+fetch_ok() { curl -fsS --max-time 20 -o /dev/null "$1" 2>&1; }
+
+case "$1" in
+  run)
+    name="$2"; shift 2
+    out=$("$@" 2>&1); code=$?
+    echo "$(date -Is) $name exit=$code"; echo "$out"
+    if [ $code -eq 0 ]; then date +%s > "$STATE/$name.ok"; report "$name" ok "$name ran normally again."
+    else report "$name" fail "$name failed (exit $code). Last lines:
+$(echo "$out" | tail -n 30)"; fi
+    exit $code ;;
+  check)
+    if err=$(fetch_ok "http://127.0.0.1:8787/health"); then report "api" ok "The API answers again."
+    else report "api" fail "The API on this server is not answering: $err
+systemd says: $(systemctl is-active lalcha-api)"; fi
+    if err=$(fetch_ok "https://$DOMAIN/"); then report "website" ok "https://$DOMAIN/ loads again."
+    else report "website" fail "https://$DOMAIN/ does not load: $err"; fi
+    if err=$(fetch_ok "https://demo.$DOMAIN/v1/demo"); then report "demo" ok "The demo store answers again."
+    else report "demo" fail "The demo store does not answer: $err"; fi
+    age() { last=$(cat "$STATE/$1.ok" 2>/dev/null || echo 0); echo $(( ($(date +%s) - last) / 3600 )); }
+    # Only once a job has run under the watcher; before that there is nothing to compare with.
+    if [ -f "$STATE/backup.ok" ] && [ "$(age backup)" -ge 26 ]; then report "backup-late" fail "The last good backup was $(age backup) hours ago. It should run every night."
+    else report "backup-late" ok "A backup has run again."; fi
+    if [ -f "$STATE/demo-reset.ok" ] && [ "$(age demo-reset)" -ge 3 ]; then report "demo-reset-late" fail "The demo store was last reset $(age demo-reset) hours ago. It should reset every hour."
+    else report "demo-reset-late" ok "The demo store is resetting again."; fi
+    used=$(df --output=pcent / | tail -1 | tr -dc 0-9)
+    if [ "$used" -ge 90 ]; then report "disk" fail "The server's disk is ${used}% full."
+    else report "disk" ok "Disk space is fine again (${used}% used)."; fi ;;
+  test) echo "This is a test. If you can read it, alerts work." | alert "Test alert" ;;
+  *) echo "usage: lalcha-watch run <name> <command...> | check | test"; exit 2 ;;
+esac

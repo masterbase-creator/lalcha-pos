@@ -132,6 +132,8 @@ export const products = pgTable(
     /** Set on a variant: the main product it is listed under. Each variant keeps its own stock. */
     variantOf: uuid("variant_of"),
     variantName: text("variant_name"),
+    wholesalePricePoisha: bigint("wholesale_price_poisha", { mode: "number" }),
+    dailyRate: boolean("daily_rate").notNull().default(false),
     /** "batch" follows batch numbers and expiry dates; "serial" follows one IMEI or serial per piece. */
     tracking: text("tracking", { enum: ["none", "batch", "serial"] }).notNull().default("none"),
     warrantyMonths: integer("warranty_months"),
@@ -809,4 +811,22 @@ export const expenses = pgTable(
     voidedAt: timestamp("voided_at", { withTimezone: true }),
   },
   (t) => [primaryKey({ columns: [t.storeId, t.id] }), index("expenses_store_date").on(t.storeId, t.spentOn)],
+);
+
+/** A restaurant order that hasn't been paid yet. Kept on the server so every till at the branch sees the same tables. */
+export const openOrders = pgTable(
+  "open_orders",
+  {
+    storeId: storeId(),
+    key: text("key").notNull(),
+    branchId: uuid("branch_id").notNull(),
+    tableName: text("table_name"),
+    orderType: text("order_type").notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull(),
+    lines: jsonb("lines").$type<unknown[]>().notNull(),
+    sent: jsonb("sent").$type<Record<string, number>>().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedBy: uuid("updated_by"),
+  },
+  (t) => [primaryKey({ columns: [t.storeId, t.key] })],
 );

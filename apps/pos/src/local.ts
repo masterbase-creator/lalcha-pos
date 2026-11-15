@@ -52,7 +52,7 @@ export async function loadProducts(): Promise<CatalogProduct[]> {
     variantOf: (r.variant_of as string | null) ?? null,
     variantName: (r.variant_name as string | null) ?? null,
     packs: JSON.parse((r.packs as string | null) ?? "[]") as Pack[],
-    ...(JSON.parse((r.extra as string | null) ?? "{}") as Pick<CatalogProduct, "tracking" | "warrantyMonths" | "genericName" | "modifiers" | "nextExpiry">),
+    ...(JSON.parse((r.extra as string | null) ?? "{}") as Pick<CatalogProduct, "tracking" | "warrantyMonths" | "genericName" | "modifiers" | "nextExpiry" | "wholesalePricePoisha" | "dailyRate">),
     stock: (r.stock as number) - (sold.get(r.id as string) ?? 0),
   }));
 }
@@ -64,7 +64,7 @@ export async function saveCatalog(catalog: CatalogResponse) {
       sql: "INSERT INTO products (id, sku, barcode, name_en, name_bn, category, price_poisha, image_url, stock, unit, vat_rate_bp, variant_of, variant_name, packs, extra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       bind: [
         p.id, p.sku, p.barcode, p.nameEn, p.nameBn, p.category, p.pricePoisha, p.imageUrl, p.stock, p.unit, p.vatRateBp, p.variantOf ?? null, p.variantName ?? null, JSON.stringify(p.packs ?? []),
-        JSON.stringify({ tracking: p.tracking ?? "none", warrantyMonths: p.warrantyMonths ?? null, genericName: p.genericName ?? null, modifiers: p.modifiers ?? [], nextExpiry: p.nextExpiry ?? null }),
+        JSON.stringify({ tracking: p.tracking ?? "none", warrantyMonths: p.warrantyMonths ?? null, genericName: p.genericName ?? null, modifiers: p.modifiers ?? [], nextExpiry: p.nextExpiry ?? null, wholesalePricePoisha: p.wholesalePricePoisha ?? null, dailyRate: p.dailyRate ?? false }),
       ],
     })),
     { sql: "INSERT OR REPLACE INTO meta (k, v) VALUES ('store_name', ?)", bind: [catalog.store.name] },
@@ -194,13 +194,30 @@ export async function loadTables(): Promise<TableRecord[]> {
   return JSON.parse((await getMeta("tables")) ?? "[]") as TableRecord[];
 }
 
-/** A restaurant order kept open on this device: what's on it, and how much has gone to the kitchen. */
-export type OpenOrder = { key: string; tableName: string | null; orderType: "dine_in" | "takeaway" | "delivery"; openedAt: string; lines: unknown[]; sent: Record<string, number> };
+/**
+ * A restaurant order still open: what's on it, and how much has gone to the kitchen. Every till at the
+ * branch sees the same orders. `dirty` marks one changed here that the server hasn't received yet.
+ */
+export type OpenOrder = { key: string; tableName: string | null; orderType: "dine_in" | "takeaway" | "delivery"; openedAt: string; lines: unknown[]; sent: Record<string, number>; dirty?: boolean };
 export async function loadOpenOrders(): Promise<OpenOrder[]> {
   return JSON.parse((await getMeta("open_orders")) ?? "[]") as OpenOrder[];
 }
 export async function saveOpenOrders(orders: OpenOrder[]) {
   await setMeta("open_orders", JSON.stringify(orders));
+}
+/** Orders paid or cleared here, waiting for the server to be told. */
+export async function loadClosedOrderKeys(): Promise<string[]> {
+  return JSON.parse((await getMeta("closed_orders")) ?? "[]") as string[];
+}
+export async function saveClosedOrderKeys(keys: string[]) {
+  await setMeta("closed_orders", JSON.stringify(keys));
+}
+/** Takes the server's list, keeping anything changed here that hasn't gone up yet. */
+export async function mergeServerOrders(server: OpenOrder[]) {
+  const [local, closed] = await Promise.all([loadOpenOrders(), loadClosedOrderKeys()]);
+  const mine = local.filter((o) => o.dirty);
+  const skip = new Set([...closed, ...mine.map((o) => o.key)]);
+  await saveOpenOrders([...server.filter((o) => !skip.has(o.key)).map(({ key, tableName, orderType, openedAt, lines, sent }) => ({ key, tableName, orderType, openedAt, lines, sent })), ...mine]);
 }
 
 export async function getStoreName() {
@@ -404,7 +421,7 @@ export async function clearDemoTill() {
     { sql: "DELETE FROM outbox" },
     { sql: "DELETE FROM recent_sales" },
     { sql: "DELETE FROM customers" },
-    { sql: "DELETE FROM meta WHERE k IN ('recent_since', 'receipt_seq', 'shift', 'open_orders')" },
+    { sql: "DELETE FROM meta WHERE k IN ('recent_since', 'receipt_seq', 'shift', 'open_orders', 'closed_orders')" },
   ]);
 }
 

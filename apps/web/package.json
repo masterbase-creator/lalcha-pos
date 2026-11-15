@@ -11,5 +11,8 @@
   "devDependencies": {
     "@fontsource/archivo": "5.2.0",
     "@fontsource/hind-siliguri": "5.2.0"
+  },
+  "dependencies": {
+    "zod": "^4.6.6"
   }
 }

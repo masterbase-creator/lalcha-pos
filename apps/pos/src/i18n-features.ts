@@ -1,6 +1,11 @@
 /** Wording for onboarding, batches, serials, restaurant, loyalty, accounts and printing. */
 export const featureStrings = {
   en: {
+    // Wholesale, today's rates, WhatsApp
+    more: "More", rates: "Today's rates", ratesHelp: "Prices that change day to day. Set this morning's price here; every till gets it at once.", ratesEmpty: "No products here yet. Open a product and tick \"Price changes often\".",
+    ratesNow: "Now", retail: "Retail", wholesale: "Wholesale", saveRates: "Save prices", ratesSaved: "Prices saved. Every till has them now.",
+    wholesalePrice: "Wholesale price (optional)", dailyRateOpt: "Price changes often", dailyRateHelp: "Shows on Today's rates, so you can change it quickly each morning.",
+    wholesaleBill: "Wholesale prices", sendWhatsApp: "Send on WhatsApp", remindWhatsApp: "Remind on WhatsApp", remindSms: "Remind by SMS", remindNeedsPhone: "Add this customer's mobile number to send a reminder.",
     // Shop name and logo
     storeIdentity: "Shop name and logo", uploadLogo: "Upload logo", changeLogo: "Change logo", removeLogo: "Remove logo", logoHelp: "Your tills, receipts, browser tab and installed app show this name and logo.", saveName: "Save name",
     // PIN reset and account
@@ -16,7 +21,7 @@ export const featureStrings = {
     onbStepOf: "Step", back: "Back", next: "Next", startSelling: "Start selling", alwaysIncluded: "Always included: selling, stock, baki, suppliers, returns, reports, staff and branches.",
     // Printing
     printBrowser: "Use the normal print window", printBrowserHelp: "Works with any printer. Good to start with.",
-    printDirect: "Print straight to a thermal printer", printDirectHelp: "One tap, no print window. Needs a USB or serial receipt printer, in Chrome or Edge.",
+    printDirect: "Print straight to a thermal printer", printDirectHelp: "One tap, no print window. Works with USB, serial and Bluetooth receipt printers, in Chrome or Edge (Bluetooth on Android too).",
     paperWidth: "Paper width", cashDrawerOpt: "Open the cash drawer after a cash sale", cashDrawerHelp: "The drawer must be plugged into the receipt printer.",
     kitchenTicketsOpt: "Print kitchen tickets", connectPrinter: "Connect printer", printerConnected: "Printer connected", printerNotConnected: "No printer connected on this device",
     printerFailed: "Couldn't reach the printer. Check the cable and power, then try again.", testPrint: "Test print", openDrawer: "Open drawer",
@@ -65,6 +70,11 @@ export const featureStrings = {
     invalid_range: "Choose a valid date range (up to a year).",
   },
   bn: {
+    // Wholesale, today's rates, WhatsApp
+    more: "আরো", rates: "আজকের দর", ratesHelp: "যেসব পণ্যের দাম রোজ বদলায়। সকালের দাম এখানে বসান, সব কাউন্টারে সাথে সাথে চলে যাবে।", ratesEmpty: "এখানে এখনো কোনো পণ্য নেই। পণ্য খুলে \"দাম প্রায়ই বদলায়\" টিক দিন।",
+    ratesNow: "এখন", retail: "খুচরা", wholesale: "পাইকারি", saveRates: "দাম সেভ করুন", ratesSaved: "দাম সেভ হয়েছে। সব কাউন্টারে চলে গেছে।",
+    wholesalePrice: "পাইকারি দাম (ঐচ্ছিক)", dailyRateOpt: "দাম প্রায়ই বদলায়", dailyRateHelp: "\"আজকের দর\" পাতায় আসবে, সকালে চট করে দাম বদলাতে পারবেন।",
+    wholesaleBill: "পাইকারি দরে", sendWhatsApp: "হোয়াটসঅ্যাপে পাঠান", remindWhatsApp: "হোয়াটসঅ্যাপে মনে করান", remindSms: "এসএমএসে মনে করান", remindNeedsPhone: "মনে করাতে চাইলে কাস্টমারের মোবাইল নম্বর যোগ করুন।",
     storeIdentity: "দোকানের নাম ও লোগো", uploadLogo: "লোগো দিন", changeLogo: "লোগো বদলান", removeLogo: "লোগো সরান", logoHelp: "আপনার দোকানের অ্যাপ, রসিদ, ব্রাউজার ট্যাব আর মোবাইলে ইনস্টল করা অ্যাপে এই নাম ও লোগো দেখাবে।", saveName: "নাম সেভ করুন",
     forgotPin: "পিন ভুলে গেছেন?", resetTitle: "নতুন পিন দিন", resetHelp: "আপনার ইমেইল দিন। নতুন পিন দেওয়ার জন্য ৬ সংখ্যার একটা কোড পাঠাব।",
     resetCashierHelp: "ক্যাশিয়ার হলে মালিক বা ম্যানেজারকে বলুন, কর্মী পাতা থেকে নতুন পিন দিয়ে দেবেন।", codeSentEmail: "এই ইমেইল এই দোকানের মালিক বা ম্যানেজারের হলে কোড চলে গেছে। স্প্যাম ফোল্ডারও দেখে নিন।",
@@ -76,7 +86,7 @@ export const featureStrings = {
     onbStep2Help: "আপনার মতো দোকানে সাধারণত যা লাগে, তা আগেই টিক দেওয়া আছে। পরে সেটিংস থেকে যখন খুশি বদলাতে পারবেন।", onbStep3: "রসিদ আর ক্যাশ ড্রয়ার",
     onbStepOf: "ধাপ", back: "পেছনে", next: "পরের ধাপ", startSelling: "বিক্রি শুরু করুন", alwaysIncluded: "সবসময় থাকছে: বিক্রি, স্টক, বাকির খাতা, সরবরাহকারী, ফেরত, রিপোর্ট, কর্মী ও শাখা।",
     printBrowser: "সাধারণ প্রিন্ট উইন্ডো দিয়ে", printBrowserHelp: "যেকোনো প্রিন্টারে চলে। শুরুতে এটাই সহজ।",
-    printDirect: "সরাসরি থার্মাল প্রিন্টারে", printDirectHelp: "এক ট্যাপেই প্রিন্ট, কোনো উইন্ডো আসবে না। ইউএসবি বা সিরিয়াল রসিদ প্রিন্টার আর ক্রোম বা এজ ব্রাউজার লাগবে।",
+    printDirect: "সরাসরি থার্মাল প্রিন্টারে", printDirectHelp: "এক ট্যাপেই প্রিন্ট, কোনো উইন্ডো আসবে না। ইউএসবি, সিরিয়াল বা ব্লুটুথ রসিদ প্রিন্টারে চলে, ক্রোম বা এজ ব্রাউজারে (অ্যান্ড্রয়েডে ব্লুটুথ)।",
     paperWidth: "কাগজের মাপ", cashDrawerOpt: "নগদ বিক্রির পর ক্যাশ ড্রয়ার খুলবে", cashDrawerHelp: "ড্রয়ারটি রসিদ প্রিন্টারের সাথে লাগানো থাকতে হবে।",
     kitchenTicketsOpt: "কিচেন টিকিট প্রিন্ট হবে", connectPrinter: "প্রিন্টার যুক্ত করুন", printerConnected: "প্রিন্টার যুক্ত আছে", printerNotConnected: "এই ডিভাইসে কোনো প্রিন্টার যুক্ত নেই",
     printerFailed: "প্রিন্টারে পৌঁছানো গেল না। তার আর পাওয়ার ঠিক আছে কিনা দেখে আবার চেষ্টা করুন।", testPrint: "টেস্ট প্রিন্ট", openDrawer: "ড্রয়ার খুলুন",

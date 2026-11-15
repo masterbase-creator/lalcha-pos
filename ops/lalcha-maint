@@ -1,0 +1,11 @@
+#!/bin/sh
+# Scheduled Lalcha jobs: backup (dump, encrypt, upload to R2, prune old ones) and cleanup.
+set -e
+run() { runuser -u lalcha -- sh -c "cd /srv/lalcha/app/apps/api && set -a && . /etc/lalcha/api.env && set +a && exec /opt/node/bin/node --import tsx src/maintenance.ts $*"; }
+case "$1" in
+  backup)
+    runuser -u postgres -- pg_dump -p 5433 -Fc lalcha | run backup
+    run prune ;;
+  cleanup|backups|migrate-images) run "$1" ;;
+  *) echo "usage: lalcha-maint backup|cleanup|backups|migrate-images"; exit 2 ;;
+esac

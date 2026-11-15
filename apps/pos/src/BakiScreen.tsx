@@ -2,7 +2,8 @@ import { formatTaka, SUPPLIER_PAYMENT_METHODS, type CustomerDetail, type Custome
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { v7 as uuidv7 } from "uuid";
 import type { StringKey } from "./i18n";
-import { addLocalCustomer, enqueueOp, updateLocalCustomer } from "./local";
+import { addLocalCustomer, enqueueOp, getStoreName, updateLocalCustomer } from "./local";
+import { bakiReminder, smsLink, whatsappLink } from "./share";
 import { apiFetch, getAuth } from "./session";
 
 type T = (k: StringKey) => string;
@@ -150,6 +151,8 @@ function CustomerView({
   const [busy, setBusy] = useState(false);
   const paymentId = useRef(uuidv7());
   const [page, setPage] = useState(1);
+  const [storeName, setStoreName] = useState("");
+  useEffect(() => void getStoreName().then(setStoreName), []);
   const when = (iso: string) => new Date(iso).toLocaleDateString(lang === "bn" ? "bn-BD" : "en-GB");
 
   const load = useCallback(async () => {
@@ -232,6 +235,16 @@ function CustomerView({
                 )}
                 <button disabled={busy || money(amount) <= 0} onClick={() => void collect()} className="min-h-14 w-full bg-[#12130f] text-xl font-black text-accent ring-2 ring-line disabled:opacity-40">{t("collectBaki")}</button>
               </div>
+            )}
+            {customer.duePoisha > 0 && (
+              customer.phone ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <a data-testid="remind-whatsapp" target="_blank" rel="noreferrer" href={whatsappLink(customer.phone, bakiReminder(storeName, customer.name, customer.duePoisha, lang))} className="flex min-h-12 items-center justify-center border-[3px] border-line text-center font-black">{t("remindWhatsApp")}</a>
+                  <a data-testid="remind-sms" href={smsLink(customer.phone, bakiReminder(storeName, customer.name, customer.duePoisha, lang))} className="flex min-h-12 items-center justify-center border-[3px] border-line text-center font-black">{t("remindSms")}</a>
+                </div>
+              ) : (
+                <p className="text-sm font-bold text-muted">{t("remindNeedsPhone")}</p>
+              )
             )}
             {detail && detail.sales.length > 0 && (
               <>

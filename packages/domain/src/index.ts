@@ -223,6 +223,10 @@ const productFields = z.object({
   variantOf: z.string().uuid().nullable().default(null),
   variantName: z.string().trim().max(60).nullable().default(null),
   packs: z.array(packSchema).max(10).default([]),
+  /** A second price for wholesale buyers; the cashier switches the bill to it. */
+  wholesalePricePoisha: poisha.nullable().default(null),
+  /** Its price changes day to day (onion, eggs, gold), so it appears on the "today's rates" screen. */
+  dailyRate: z.boolean().default(false),
   tracking: z.enum(TRACKING).default("none"),
   /** Shown on the receipt and used for warranty lookups of serial-tracked goods. */
   warrantyMonths: z.number().int().min(0).max(120).nullable().default(null),
@@ -539,6 +543,8 @@ export type CatalogProduct = {
   variantOf: string | null;
   variantName: string | null;
   packs: Pack[];
+  wholesalePricePoisha?: number | null;
+  dailyRate?: boolean;
   tracking?: Tracking;
   warrantyMonths?: number | null;
   genericName?: string | null;
@@ -591,6 +597,8 @@ export type CatalogResponse = {
   /** Offers the till can apply without a connection. */
   coupons?: CouponRecord[];
   tables?: TableRecord[];
+  /** Restaurant orders still open at this branch, shared by all its tills. */
+  orders?: OpenOrderRecord[];
 };
 
 export type Lang = "en" | "bn";
@@ -762,3 +770,23 @@ export type ProfitLoss = {
   salesPoisha: number; returnsPoisha: number; netSalesPoisha: number; vatPoisha: number; costOfGoodsPoisha: number; grossProfitPoisha: number;
   expenses: { category: ExpenseCategory; amountPoisha: number }[]; expensesPoisha: number; writeOffsPoisha: number; netProfitPoisha: number;
 };
+
+/* ---------- Open restaurant orders, shared between tills ---------- */
+
+export const openOrderSchema = z.object({
+  key: z.string().regex(/^[a-z0-9-]{3,80}$/),
+  tableName: z.string().trim().max(40).nullable(),
+  orderType: z.enum(["dine_in", "takeaway", "delivery"]),
+  openedAt: z.string().datetime(),
+  /** The bill lines exactly as the till holds them. */
+  lines: z.array(z.unknown()).max(300),
+  /** How much of each line the kitchen has already been sent. */
+  sent: z.record(z.string(), z.number()),
+});
+export type OpenOrderRecord = z.infer<typeof openOrderSchema> & { updatedAt: string };
+
+/* ---------- Today's rates ---------- */
+
+export const priceUpdateSchema = z.object({
+  prices: z.array(z.object({ id: z.string().uuid(), pricePoisha: poisha, wholesalePricePoisha: poisha.nullable().optional() })).min(1).max(500),
+});

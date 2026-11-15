@@ -2,6 +2,8 @@
 // warranty, restaurant tables, loyalty (points, coupons, gift cards), and expenses with accounts.
 import {
   couponInputSchema,
+  openOrderSchema,
+  priceUpdateSchema,
   EXPENSE_LABELS,
   expenseInputSchema,
   giftCardIssueSchema,
@@ -23,7 +25,7 @@ import { z } from "zod";
 import { managers, staffOnly } from "./auth.ts";
 import { audit, pgCode, withStore, type Env, type Tx } from "./db.ts";
 import { ApiError, guarded, idParam, parse } from "./http.ts";
-import { coupons, customers, expenses, giftCardLedger, giftCards, loyaltyLedger, restaurantTables, stockBatches, stockLedger } from "./schema.ts";
+import { coupons, customers, expenses, giftCardLedger, giftCards, loyaltyLedger, openOrders, products, restaurantTables, stockBatches, stockLedger } from "./schema.ts";
 
 const DAY_MS = 86_400_000;
 const isDate = (v: string | undefined): v is string => /^\d{4}-\d{2}-\d{2}$/.test(v ?? "") && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
@@ -178,6 +180,53 @@ export function registerFeatures(app: Hono<Env>) {
       const store = c.get("store");
       const id = idParam(c);
       await withStore(store.id, (tx) => tx.update(restaurantTables).set({ archivedAt: new Date() }).where(and(eq(restaurantTables.storeId, store.id), eq(restaurantTables.id, id))));
+      return c.json({ ok: true });
+    }),
+  );
+
+  /* ---------- Open orders, shared by every till at the branch ---------- */
+
+  app.put(
+    "/v1/orders/:key",
+    ...staffOnly,
+    guarded(async (c) => {
+      const store = c.get("store");
+      const input = await parse(c, openOrderSchema);
+      if (input.key !== c.req.param("key")) throw new ApiError("invalid");
+      const row = { branchId: c.get("device").branchId, tableName: input.tableName, orderType: input.orderType, openedAt: new Date(input.openedAt), lines: input.lines, sent: input.sent, updatedAt: new Date(), updatedBy: c.get("user").id };
+      await withStore(store.id, (tx) => tx.insert(openOrders).values({ storeId: store.id, key: input.key, ...row }).onConflictDoUpdate({ target: [openOrders.storeId, openOrders.key], set: row }));
+      return c.json({ ok: true });
+    }),
+  );
+
+  app.delete(
+    "/v1/orders/:key",
+    ...staffOnly,
+    guarded(async (c) => {
+      const store = c.get("store");
+      const key = (c.req.param("key") ?? "").slice(0, 80);
+      await withStore(store.id, (tx) => tx.delete(openOrders).where(and(eq(openOrders.storeId, store.id), eq(openOrders.key, key))));
+      return c.json({ ok: true });
+    }),
+  );
+
+  /* ---------- Today's rates: many prices changed in one go ---------- */
+
+  app.put(
+    "/v1/prices",
+    ...managers,
+    guarded(async (c) => {
+      const store = c.get("store");
+      const { prices } = await parse(c, priceUpdateSchema);
+      await withStore(store.id, async (tx) => {
+        for (const p of prices) {
+          await tx
+            .update(products)
+            .set({ pricePoisha: p.pricePoisha, ...(p.wholesalePricePoisha !== undefined ? { wholesalePricePoisha: p.wholesalePricePoisha } : {}) })
+            .where(and(eq(products.storeId, store.id), eq(products.id, p.id), isNull(products.archivedAt)));
+        }
+        await audit(tx, store.id, c.get("user").id, "prices_update", null, { count: prices.length });
+      });
       return c.json({ ok: true });
     }),
   );

@@ -9,13 +9,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@lalcha/domain": "workspace:*",
     "@fontsource/archivo": "^5.2.0",
     "@fontsource/hind-siliguri": "^5.2.0",
+    "@lalcha/domain": "workspace:*",
     "@sqlite.org/sqlite-wasm": "3.54.1-build1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",

@@ -43,8 +43,10 @@ import { strings, type StringKey } from "./i18n";
 import { ShiftDialog } from "./ShiftDialog";
 import { AuditScreen } from "./AuditScreen";
 import { BranchesScreen } from "./BranchesScreen";
-import { addLocalCustomer, getStoreName, loadBranchName, loadCoupons, loadCustomers, loadOpenOrders, loadProducts, loadSettings, loadSubscription, loadTables, recordSale, saveOpenOrders, type OpenOrder } from "./local";
+import { addLocalCustomer, getStoreName, loadBranchName, loadClosedOrderKeys, loadCoupons, loadCustomers, loadOpenOrders, saveClosedOrderKeys, loadProducts, loadSettings, loadSubscription, loadTables, recordSale, saveOpenOrders, type OpenOrder } from "./local";
 import { SettingsScreen } from "./SettingsScreen";
+import { RatesScreen } from "./RatesScreen";
+import { receiptText, whatsappLink } from "./share";
 import { BillingScreen } from "./BillingScreen";
 import { BakiScreen } from "./BakiScreen";
 import { ReportsScreen } from "./ReportsScreen";
@@ -63,18 +65,20 @@ import { groupTiles, isPack, toSellables, type Sellable } from "./sellables";
  * One line on the bill. The same product can sit on two lines when its extras differ (a burger with
  * cheese and one without) or, for serial-tracked goods, one line per piece.
  */
-type CartLine = { key: string; product: Sellable; qty: number; note: string | null; extraPoisha: number; serials: string[] };
-const unitPrice = (l: CartLine) => l.product.pricePoisha + l.extraPoisha;
+type CartLine = { key: string; product: Sellable; qty: number; note: string | null; extraPoisha: number; serials: string[]; wholesale?: boolean };
+/** A bill switched to wholesale uses each product's wholesale price where it has one. */
+const unitPrice = (l: CartLine) => (l.wholesale && l.product.wholesalePricePoisha != null ? l.product.wholesalePricePoisha : l.product.pricePoisha) + l.extraPoisha;
 
-type View = "sell" | "products" | "purchase" | "baki" | "returns" | "reports" | "expiry" | "warranty" | "loyalty" | "accounts" | "branches" | "audit" | "staff" | "billing" | "settings" | "account";
+type View = "sell" | "products" | "rates" | "purchase" | "baki" | "returns" | "reports" | "expiry" | "warranty" | "loyalty" | "accounts" | "branches" | "audit" | "staff" | "billing" | "settings" | "account";
 /** The menu follows what the store switched on: a grocery never sees Warranty, a pharmacy sees Expiry. */
-function viewsFor(role: string, s: StoreSettings): View[] {
+function viewsFor(role: string, s: StoreSettings, hasRates: boolean): View[] {
   const optional: [View, boolean][] = [["expiry", hasFeature(s, "batches")], ["warranty", hasFeature(s, "serials")], ["loyalty", hasFeature(s, "loyalty")], ["accounts", hasFeature(s, "accounting")]];
   const extra = optional.filter(([, on]) => on).map(([v]) => v);
   if (role === "cashier") return ["sell", "baki", ...(hasFeature(s, "serials") ? (["warranty"] as View[]) : []), "account"];
-  const manager: View[] = ["sell", "products", "purchase", "baki", "returns", "reports", ...extra, "branches", "audit", "staff"];
+  const manager: View[] = ["sell", "products", ...(hasRates ? (["rates"] as View[]) : []), "purchase", "baki", "returns", "reports", ...extra, "branches", "audit", "staff"];
   return role === "owner" ? [...manager, "billing", "settings", "account"] : [...manager, "account"];
 }
+const MAIN_VIEWS: View[] = ["sell", "products", "rates", "purchase", "baki", "reports"];
 /** Shown inside another page, such as the demo on the website: grabbing focus there would scroll that page. */
 const EMBEDDED = window.self !== window.top;
 
@@ -111,6 +115,11 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   const [order, setOrder] = useState<{ key: string; tableName: string | null; orderType: OpenOrder["orderType"] } | null>(null);
   const [extrasFor, setExtrasFor] = useState<Sellable | null>(null);
   const [serialFor, setSerialFor] = useState<Sellable | null>(null);
+  /** The whole bill at wholesale prices, for a dealer or a shopkeeper buying in bulk. */
+  const [wholesale, setWholesale] = useState(false);
+  useEffect(() => {
+    setCart((c) => (c.some((l) => Boolean(l.wholesale) !== wholesale) ? c.map((l) => ({ ...l, wholesale })) : c));
+  }, [cart, wholesale]);
   const [kot, setKot] = useState<{ title: string; lines: CartLine[] } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const brand = useBrand();
@@ -161,7 +170,12 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
 
   const canManage = user.role !== "cashier";
   const plan = subscription ? subscriptionState(subscription) : null;
-  const views = viewsFor(user.role, settings);
+  const hasWholesale = useMemo(() => (products ?? []).some((p) => p.wholesalePricePoisha != null), [products]);
+  const views = viewsFor(user.role, settings, (products ?? []).some((p) => p.dailyRate));
+  // The everyday screens stay on the bar; the rest sit behind "More", so the bar never needs sideways scrolling.
+  const mainViews = views.filter((v) => MAIN_VIEWS.includes(v));
+  const moreViews = views.filter((v) => !MAIN_VIEWS.includes(v));
+  const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => {
     setView((v) => (views.includes(v) ? v : "sell"));
   }, [views.join()]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -319,6 +333,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
   function resetSale() {
     setCart([]);
     setCouponCode(null);
+    setWholesale(false);
     setOrder(null);
     setDiscountText("");
     setReceipt(null);
@@ -343,11 +358,23 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
     return id;
   }
 
-  /* ---------- Restaurant: open orders kept on this device ---------- */
+  /* ---------- Restaurant: open orders, shared by every till at the branch ---------- */
 
-  async function storeOrders(next: OpenOrder[]) {
+  /** Saves one order here and marks it to go up, so the other tills show it within seconds. */
+  async function putOrder(saved: OpenOrder) {
+    const next = [...orders.filter((o) => o.key !== saved.key), { ...saved, dirty: true }];
     setOrders(next);
     await saveOpenOrders(next);
+    await saveClosedOrderKeys((await loadClosedOrderKeys()).filter((k) => k !== saved.key));
+    void syncNow();
+  }
+  /** A paid or emptied order leaves every till. */
+  async function closeOrder(key: string) {
+    const next = orders.filter((o) => o.key !== key);
+    setOrders(next);
+    await saveOpenOrders(next);
+    await saveClosedOrderKeys([...new Set([...(await loadClosedOrderKeys()), key])]);
+    void syncNow();
   }
 
   /** Saves what's on screen to its table (or takeaway ticket) and clears the screen for the next one. */
@@ -355,7 +382,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
     if (!order || cart.length === 0) return;
     const existing = orders.find((o) => o.key === order.key);
     const saved: OpenOrder = { key: order.key, tableName: order.tableName, orderType: order.orderType, openedAt: existing?.openedAt ?? new Date().toISOString(), lines: cart, sent: existing?.sent ?? {} };
-    await storeOrders([...orders.filter((o) => o.key !== order.key), saved]);
+    await putOrder(saved);
     setCart([]);
     setOrder(null);
     setNotice(t("orderKept"));
@@ -382,7 +409,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       await printDirect(kitchenLines(title, fresh, lang), settings.paperWidth).catch(() => setKot({ title, lines: fresh }));
     } else setKot({ title, lines: fresh });
     const nextSent = Object.fromEntries(cart.map((l) => [l.key, l.qty]));
-    await storeOrders([...orders.filter((o) => o.key !== order.key), { key: order.key, tableName: order.tableName, orderType: order.orderType, openedAt: existing?.openedAt ?? new Date().toISOString(), lines: cart, sent: nextSent }]);
+    await putOrder({ key: order.key, tableName: order.tableName, orderType: order.orderType, openedAt: existing?.openedAt ?? new Date().toISOString(), lines: cart, sent: nextSent });
     setNotice(t("sentToKitchen"));
   }
 
@@ -418,7 +445,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       tableName: order?.tableName ?? null,
       orderType: order?.orderType ?? null,
     });
-    if (order) await storeOrders(orders.filter((o) => o.key !== order.key));
+    if (order) await closeOrder(order.key);
     setPaying(false);
     setReceipt(sale);
     if (settings.receiptPrinter === "direct") {
@@ -477,12 +504,29 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
         </div>
       </header>
 
-      <nav className="no-print flex shrink-0 overflow-x-auto border-b-[3px] border-line bg-panel font-black">
-        {views.map((v) => (
-          <button key={v} aria-pressed={view === v} className={`min-h-12 flex-1 px-4 whitespace-nowrap ${view === v ? "bg-text text-bg" : ""}`} onClick={() => setView(v)}>
+      <nav className="no-print relative flex shrink-0 border-b-[3px] border-line bg-panel font-black">
+        {mainViews.map((v) => (
+          <button key={v} aria-pressed={view === v} className={`relative z-40 min-h-12 min-w-0 flex-1 truncate px-2 sm:px-4 ${view === v ? "bg-text text-bg" : ""}`} onClick={() => { setView(v); setMenuOpen(false); }}>
             {t(v)}
           </button>
         ))}
+        {moreViews.length > 0 && (
+          <button data-testid="more-menu" aria-expanded={menuOpen} aria-pressed={moreViews.includes(view)} className={`relative z-40 min-h-12 shrink-0 border-l-[3px] border-line px-3 whitespace-nowrap sm:px-4 ${moreViews.includes(view) ? "bg-text text-bg" : ""}`} onClick={() => setMenuOpen((o) => !o)}>
+            {moreViews.includes(view) ? t(view) : t("more")} <span aria-hidden="true">{menuOpen ? "▴" : "▾"}</span>
+          </button>
+        )}
+        {menuOpen && (
+          <>
+            <button aria-label={t("close")} className="fixed inset-0 z-30 cursor-default" onClick={() => setMenuOpen(false)} />
+            <div role="menu" className="absolute top-full right-0 z-40 grid w-full max-w-md grid-cols-2 gap-2 border-[3px] border-line bg-panel p-2 shadow-[6px_6px_0_0_var(--color-line)] sm:grid-cols-3">
+              {moreViews.map((v) => (
+                <button key={v} role="menuitem" aria-pressed={view === v} className={`min-h-14 border-[3px] border-line px-2 ${view === v ? "bg-text text-bg" : "bg-bg"}`} onClick={() => { setView(v); setMenuOpen(false); }}>
+                  {t(v)}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </nav>
       {plan && (plan.status === "expired" || plan.status === "grace" || plan.daysLeft <= 7) && (
         <div role="status" data-testid="sub-banner" className="no-print flex shrink-0 items-center justify-between gap-3 bg-hot px-3 py-2 font-black text-white">
@@ -532,6 +576,8 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
         <PurchaseScreen products={products ?? []} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : view === "staff" ? (
         <StaffScreen user={user} lang={lang} t={t} online={sync.online} />
+      ) : view === "rates" ? (
+        <RatesScreen key={dataVersion} products={(products ?? []).filter((p) => !isPack(p))} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : view === "products" ? (
         <ProductsScreen products={(products ?? []).filter((p) => !isPack(p))} settings={settings} lang={lang} t={t} online={sync.online} onChanged={syncFresh} />
       ) : (
@@ -541,7 +587,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
             {hasFeature(settings, "restaurant") && (
               <div className="flex gap-2 overflow-x-auto pb-1" data-testid="tables-bar">
                 <button aria-pressed={!order} onClick={() => { if (order) { void keepOpen(); setCart([]); } setOrder(null); }} className={`min-h-11 shrink-0 border-2 border-line px-3 font-black ${!order ? "bg-text text-bg" : "bg-panel"}`}>{t("counterSale")}</button>
-                <button aria-pressed={order?.orderType === "takeaway"} onClick={() => void openOrder(`takeaway-${Date.now()}`, null, "takeaway")} className="min-h-11 shrink-0 border-2 border-line bg-panel px-3 font-black">+ {t("takeaway")}</button>
+                <button aria-pressed={order?.orderType === "takeaway"} onClick={() => void openOrder(`takeaway-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, null, "takeaway")} className="min-h-11 shrink-0 border-2 border-line bg-panel px-3 font-black">+ {t("takeaway")}</button>
                 {orders.filter((o) => !o.tableName).map((o) => (
                   <button key={o.key} aria-pressed={order?.key === o.key} onClick={() => void openOrder(o.key, null, o.orderType)} className={`min-h-11 shrink-0 border-2 px-3 font-black ${order?.key === o.key ? "border-line bg-text text-bg" : "border-hot bg-panel"}`}>
                     {t(o.orderType === "delivery" ? "delivery" : "takeaway")} {new Date(o.openedAt).toLocaleTimeString(lang === "bn" ? "bn-BD" : "en-GB", { hour: "2-digit", minute: "2-digit" })}
@@ -713,6 +759,12 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
           </ul>
 
           <div className="space-y-2 border-t-[3px] border-line p-3">
+            {hasWholesale && (
+              <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 font-bold">
+                <span>{t("wholesaleBill")}</span>
+                <input data-testid="wholesale-toggle" type="checkbox" className="h-6 w-6" checked={wholesale} onChange={(e) => setWholesale(e.target.checked)} />
+              </label>
+            )}
             <div className="flex justify-between font-bold">
               <span>{t("subtotal")}</span>
               <span>{money(totals.subtotalPoisha)}</span>
@@ -818,7 +870,7 @@ export function App({ user, demo = false }: { user: CurrentUser; demo?: boolean 
       {paying && <PayDialog total={totals.totalPoisha} lang={lang} t={t} settings={settings} canOverride={canManage} customers={customers} online={sync.online} onAddCustomer={addCustomer} onCancel={() => setPaying(false)} onConfirm={completeSale} />}
       {receipt && (
         <Receipt
-          sale={receipt} storeName={storeName} settings={settings} cashierName={user.name} customerName={customers.find((c) => c.id === receipt.customerId)?.name ?? null} lang={lang} t={t} onNew={resetSale}
+          sale={receipt} storeName={storeName} settings={settings} cashierName={user.name} customerName={customers.find((c) => c.id === receipt.customerId)?.name ?? null} customerPhone={customers.find((c) => c.id === receipt.customerId)?.phone ?? null} lang={lang} t={t} onNew={resetSale}
           products={products ?? []}
           earned={receipt.customerId && hasFeature(settings, "loyalty") ? pointsEarned(receipt.paymentMethod === "baki" ? receipt.tenderedPoisha : dueByMethod(receipt), settings.loyaltyEarnPoisha) : 0}
         />
@@ -1328,12 +1380,14 @@ function Receipt({
   settings,
   cashierName,
   customerName,
+  customerPhone,
   lang,
   t,
   onNew,
   products,
   earned,
 }: {
+  customerPhone: string | null;
   sale: Sale;
   storeName: string;
   settings: StoreSettings;
@@ -1417,6 +1471,9 @@ function Receipt({
             {t("newSale")}
           </button>
         </div>
+        <a data-testid="receipt-whatsapp" target="_blank" rel="noreferrer" href={whatsappLink(customerPhone, receiptText(sale, storeName, lang))} className="no-print mt-2 flex min-h-12 items-center justify-center border-[3px] border-line bg-panel font-black">
+          {t("sendWhatsApp")}
+        </a>
       </div>
     </div>
   );

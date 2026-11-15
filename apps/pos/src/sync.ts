@@ -1,6 +1,6 @@
 import type { CatalogResponse, CustomerSummary, OpKind, RecentSale, SyncResult } from "@lalcha/domain";
 import { apiFetch, getAuth, refreshStaff } from "./session";
-import { applyOpResults, applySyncResults, getMeta, nextOps, nextPendingBatch, queueCounts, saveCatalog, saveCustomers, saveRecentSales } from "./local";
+import { applyOpResults, applySyncResults, getMeta, loadClosedOrderKeys, loadOpenOrders, mergeServerOrders, nextOps, saveClosedOrderKeys, saveOpenOrders, nextPendingBatch, queueCounts, saveCatalog, saveCustomers, saveRecentSales } from "./local";
 
 export type SyncState = { online: boolean; pending: number; rejected: number; catalogVersion: number };
 
@@ -53,6 +53,27 @@ async function pushOps(kinds: OpKind[]) {
   }
 }
 
+/** Open restaurant orders changed or closed here go up, so the other tills see them within seconds. */
+async function pushOrders() {
+  const json = { "content-type": "application/json" };
+  for (const order of (await loadOpenOrders()).filter((o) => o.dirty)) {
+    const { dirty: _dirty, ...body } = order;
+    const res = await apiFetch(`/v1/orders/${order.key}`, { method: "PUT", headers: json, body: JSON.stringify(body) });
+    // The demo and expired stores keep orders on this device only.
+    if (res.status === 403 || res.status === 402) return;
+    if (!res.ok && res.status !== 400) throw new Error(`orders ${res.status}`);
+    // Re-read: the cashier may have changed something while this was in the air.
+    const now = await loadOpenOrders();
+    await saveOpenOrders(now.map((o) => (o.key === order.key && JSON.stringify(o.lines) === JSON.stringify(order.lines) && JSON.stringify(o.sent) === JSON.stringify(order.sent) ? { ...o, dirty: false } : o)));
+  }
+  for (const key of await loadClosedOrderKeys()) {
+    const res = await apiFetch(`/v1/orders/${key}`, { method: "DELETE" });
+    if (res.status === 403 || res.status === 402) return;
+    if (!res.ok && res.status !== 400 && res.status !== 404) throw new Error(`orders ${res.status}`);
+    await saveClosedOrderKeys((await loadClosedOrderKeys()).filter((k) => k !== key));
+  }
+}
+
 async function pullRecentSales() {
   const since = (await getMeta("recent_since")) ?? "";
   const res = await apiFetch(`/v1/sync/recent-sales?since=${encodeURIComponent(since)}`);
@@ -66,6 +87,7 @@ async function pullCatalog() {
   if (!res.ok) throw new Error(`catalog ${res.status}`);
   const catalog = (await res.json()) as CatalogResponse;
   await saveCatalog(catalog);
+  if (catalog.orders) await mergeServerOrders(catalog.orders);
   await pullRecentSales();
   await refreshStaff();
   const customerRes = await apiFetch("/v1/customers");
@@ -88,6 +110,7 @@ export function syncNow() {
       await pushOps(["customer_create", "customer_update"]);
       await pushSales();
       await pushOps(["customer_payment", "sale_return", "shift_open", "shift_close"]);
+      await pushOrders();
       await pullCatalog();
       update({ online: true });
     } catch {

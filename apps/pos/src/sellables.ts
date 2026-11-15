@@ -28,6 +28,8 @@ export function toSellables(products: CatalogProduct[]): Sellable[] {
         nameEn: `${nameEn} (${pack.name})`,
         nameBn: `${nameBn} (${pack.name})`,
         pricePoisha: pack.pricePoisha,
+        // A pack has its own price; the wholesale price belongs to the single unit.
+        wholesalePricePoisha: null,
         barcode: pack.barcode,
         // Packs are counted whole, whatever the product's own unit is.
         unit: "pc",

@@ -154,6 +154,8 @@ function ProductForm({
   const [variantName, setVariantName] = useState(product?.variantName ?? "");
   const [packs, setPacks] = useState<PackRow[]>([]);
   const [cost, setCost] = useState("");
+  const [wholesale, setWholesale] = useState(base?.wholesalePricePoisha != null ? taka(base.wholesalePricePoisha) : "");
+  const [dailyRate, setDailyRate] = useState(base?.dailyRate ?? false);
   const [barcode, setBarcode] = useState(product?.barcode ?? "");
   const [stock, setStock] = useState("");
   const [photo, setPhoto] = useState<Blob | null>(null);
@@ -174,6 +176,8 @@ function ProductForm({
         const details = (await res.json()) as ProductDetails;
         if (cancelled) return;
         setCost(taka(details.costPoisha));
+        setWholesale(details.wholesalePricePoisha != null ? taka(details.wholesalePricePoisha) : "");
+        setDailyRate(details.dailyRate ?? false);
         setVariantOf(details.variantOf ?? "");
         setVariantName(details.variantName ?? "");
         setPacks((details.packs ?? []).map((p) => ({ id: p.id, name: p.name, qty: String(p.qty / QTY_SCALE), price: taka(p.pricePoisha), barcode: p.barcode ?? "" })));
@@ -270,6 +274,7 @@ function ProductForm({
         nameBn, nameEn, category, pricePoisha, costPoisha, barcode: barcode.trim() || null, unit, vatRateBp: vat.trim() === "" ? null : Math.round(Number(vat) * 100),
         variantOf: variantOf || null, variantName: variantName.trim() || null, packs: packList,
         tracking, warrantyMonths: warranty.trim() ? Math.min(120, Math.round(Number(warranty))) : null, genericName: genericName.trim() || null, modifiers: modifierList,
+        wholesalePricePoisha: wholesale.trim() ? toPoisha(wholesale) : null, dailyRate,
       };
       let id = savedId;
       const res = id
@@ -388,6 +393,14 @@ function ProductForm({
           <label className="block font-bold">
             {t("cost")}
             <input inputMode="decimal" value={cost} onChange={(e) => setCost(e.target.value.replace(/[^0-9.]/g, ""))} className={fieldClass} />
+          </label>
+          <label className="block font-bold">
+            {t("wholesalePrice")}
+            <input data-testid="wholesale-price" inputMode="decimal" value={wholesale} onChange={(e) => setWholesale(e.target.value.replace(/[^0-9.]/g, ""))} className={fieldClass} />
+          </label>
+          <label className="flex min-h-12 items-start gap-3 self-end font-bold">
+            <input data-testid="daily-rate" type="checkbox" className="mt-0.5 h-6 w-6 shrink-0" checked={dailyRate} onChange={(e) => setDailyRate(e.target.checked)} />
+            <span>{t("dailyRateOpt")}<span className="block text-sm text-muted">{t("dailyRateHelp")}</span></span>
           </label>
           <label className="block font-bold">
             {t("category")}

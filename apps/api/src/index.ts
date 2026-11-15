@@ -24,6 +24,7 @@ import { z } from "zod";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { HTTPException } from "hono/http-exception";
 import { managers, registerAuth, requireDevice, requireRole, requireSession } from "./auth.ts";
 import { config } from "./config.ts";
 import { audit, db, pgCode, withStore, type Env, type Tx } from "./db.ts";
@@ -35,11 +36,12 @@ import { registerDemo } from "./demo.ts";
 import { registerInbox } from "./inbox.ts";
 import { registerPurchases } from "./purchases.ts";
 import { registerReports } from "./reports.ts";
-import { storeSettings } from "./schema.ts";
+import { openOrders, storeSettings } from "./schema.ts";
 import { auditLog, branches, coupons, giftCardLedger, giftCards, loyaltyLedger, productPacks, products, restaurantTables, saleLines, sales, stockLedger, stores, users } from "./schema.ts";
 import { ensureBatch, receiveSerials, sellSerials, takeStock } from "./stock.ts";
 import { registerFeatures } from "./features.ts";
 import { registerAccount } from "./account.ts";
+import { rateLimit } from "./ratelimit.ts";
 import { registerStorage, saveProductImage, removeProductImage } from "./storage.ts";
 
 function subdomainFrom(host: string | undefined) {
@@ -61,6 +63,7 @@ registerStorage(app);
 const smallBody = bodyLimit({ maxSize: 2 * 1024 * 1024 });
 const mailBody = bodyLimit({ maxSize: 25 * 1024 * 1024 });
 app.use("/v1/*", (c, next) => (c.req.path === "/v1/mail/inbound" ? mailBody(c, next) : smallBody(c, next)));
+app.use("/v1/*", rateLimit);
 app.use("/v1/*", async (c, next) => {
   // Signup and your own admin page happen before, or outside, any one store.
   if (c.req.path.startsWith("/v1/public/") || c.req.path.startsWith("/v1/platform/") || c.req.path.startsWith("/v1/mail/")) return next();
@@ -77,7 +80,7 @@ registerLogin(app);
 registerPlatform(app);
 registerInbox(app);
 registerDemo(app);
-for (const path of ["/v1/products", "/v1/products/*", "/v1/suppliers", "/v1/suppliers/*", "/v1/purchases", "/v1/purchases/*", "/v1/customers", "/v1/customers/*", "/v1/sales/*", "/v1/staff", "/v1/staff/*", "/v1/devices/*", "/v1/branches", "/v1/branches/*", "/v1/transfers", "/v1/transfers/*", "/v1/batches/*", "/v1/tables", "/v1/tables/*", "/v1/coupons", "/v1/gift-cards", "/v1/gift-cards/*", "/v1/expenses", "/v1/expenses/*"]) {
+for (const path of ["/v1/products", "/v1/products/*", "/v1/suppliers", "/v1/suppliers/*", "/v1/purchases", "/v1/purchases/*", "/v1/customers", "/v1/customers/*", "/v1/sales/*", "/v1/staff", "/v1/staff/*", "/v1/devices/*", "/v1/branches", "/v1/branches/*", "/v1/transfers", "/v1/transfers/*", "/v1/batches/*", "/v1/tables", "/v1/tables/*", "/v1/coupons", "/v1/gift-cards", "/v1/gift-cards/*", "/v1/expenses", "/v1/expenses/*", "/v1/orders/*", "/v1/prices"]) {
   app.use(path, requireActiveSubscription);
 }
 registerAuth(app);
@@ -111,6 +114,8 @@ app.get("/v1/catalog", async (c) => {
         vatRateBp: products.vatRateBp,
         variantOf: products.variantOf,
         variantName: products.variantName,
+        wholesalePricePoisha: products.wholesalePricePoisha,
+        dailyRate: products.dailyRate,
         tracking: products.tracking,
         warrantyMonths: products.warrantyMonths,
         genericName: products.genericName,
@@ -149,7 +154,12 @@ app.get("/v1/catalog", async (c) => {
   ] as const);
   const expiryOf = new Map(expiries.map((e) => [e.product_id, e.next_expiry]));
   const list = rows.map((r) => ({ ...r, packs: packsOf.get(r.id) ?? [], nextExpiry: expiryOf.get(r.id) ?? null }));
-  return c.json<CatalogResponse>({ store: { name: store.name }, products: list, subscription, settings, branch, coupons: couponRows, tables: tableRows });
+  const orders = hasFeature(settings, "restaurant")
+    ? (await withStore(store.id, (tx) => tx.select().from(openOrders).where(and(eq(openOrders.storeId, store.id), eq(openOrders.branchId, device.branchId))))).map((o) => ({
+        key: o.key, tableName: o.tableName, orderType: o.orderType as "dine_in" | "takeaway" | "delivery", openedAt: o.openedAt.toISOString(), lines: o.lines, sent: o.sent, updatedAt: o.updatedAt.toISOString(),
+      }))
+    : [];
+  return c.json<CatalogResponse>({ store: { name: store.name }, products: list, subscription, settings, branch, coupons: couponRows, tables: tableRows, orders });
 });
 
 const UNIQUE_VIOLATION = "23505";
@@ -175,6 +185,8 @@ const fields = (p: ProductCreate | ProductUpdate) => ({
   vatRateBp: p.vatRateBp,
   variantOf: p.variantOf,
   variantName: p.variantOf ? p.variantName : p.variantName || null,
+  wholesalePricePoisha: p.wholesalePricePoisha,
+  dailyRate: p.dailyRate,
   tracking: p.tracking,
   warrantyMonths: p.warrantyMonths,
   genericName: p.genericName,
@@ -293,6 +305,7 @@ app.get("/v1/products/:id", async (c) => {
         id: products.id, sku: products.sku, barcode: products.barcode, nameEn: products.nameEn, nameBn: products.nameBn,
         category: products.category, pricePoisha: products.pricePoisha, costPoisha: products.costPoisha, imageUrl: products.imageUrl, unit: products.unit, vatRateBp: products.vatRateBp,
         variantOf: products.variantOf, variantName: products.variantName, tracking: products.tracking, warrantyMonths: products.warrantyMonths,
+        wholesalePricePoisha: products.wholesalePricePoisha, dailyRate: products.dailyRate,
         genericName: products.genericName, modifiers: products.modifiers,
       })
       .from(products)
@@ -580,6 +593,8 @@ app.post("/v1/sync/sales", async (c) => {
 });
 
 app.onError((err, c) => {
+  // Refusals raised by the framework itself (a request that's too large) keep their own status.
+  if (err instanceof HTTPException) return c.json({ error: err.status === 413 ? "too_large" : "invalid" }, err.status);
   console.error(err);
   return c.json({ error: "server_error" }, 500);
 });

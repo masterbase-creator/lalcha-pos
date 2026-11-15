@@ -12,18 +12,18 @@
     "demo:reset": "tsx src/demo-reset.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.14.0",
+    "@hono/node-server": "^2.1.7",
     "@lalcha/domain": "workspace:*",
     "aws4fetch": "1.0.20",
-    "drizzle-orm": "^0.44.0",
+    "drizzle-orm": "^0.45.4",
     "hono": "^4.8.0",
-    "nodemailer": "^6.9.16",
+    "nodemailer": "^10.5.0",
     "postgres": "^3.4.5",
-    "zod": "^3.25.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/nodemailer": "^6.4.17",
+    "@types/nodemailer": "^8.0.2",
     "drizzle-kit": "^0.31.0",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0"
